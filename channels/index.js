@@ -1,4 +1,6 @@
 export { BaseChannel } from './BaseChannel.js'
 export { ChannelStore, default } from './ChannelStore.js'
 export { ChannelRuntime } from './ChannelRuntime.js'
+export { OneBotsGateway } from './onebots/OneBotsGateway.js'
+export { OneBotChannel } from './onebots/OneBotChannel.js'
 export { createBackendLlm, createEchoLlm } from './llm.js'

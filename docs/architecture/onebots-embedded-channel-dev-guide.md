@@ -18,14 +18,14 @@ sequenceDiagram
     participant API as Express API (/api/channels)
     participant RT as ChannelRuntime
     participant GW as OneBotsGateway (内嵌单例)
-    participant OB as OneBots BaseApp (端口: 5727)
+    participant OB as OneBots BaseApp (进程内，无监听端口)
     participant CH as OneBotChannel (继承 BaseChannel)
     participant LLM as LLM Agent Core
 
     Note over GW,OB: 服务启动 (app.js 启动时)
-    RT->>GW: init({ port: 5727, host: '127.0.0.1' })
-    GW->>OB: 动态注册适配器与协议 (wechat, feishu, onebot-v12)
-    GW->>OB: 启动内部回环监听 (仅 127.0.0.1)
+    RT->>GW: init({ dataDir: 'channels-data/onebots' })
+    GW->>OB: 按需注册 wechat-clawbot 与 onebot-v12
+    GW->>OB: 创建 BaseApp，以 manual transport 直连协议实例
 
     Note over UI,API: 扫码绑定流程 (以微信为例)
     UI->>API: POST /api/channels/:id/qrcode
@@ -39,7 +39,7 @@ sequenceDiagram
     API-->>UI: 返回 confirmed 状态，绑定完成
 
     Note over OB,LLM: 消息交互全链路
-    OB->>CH: OneBot V12 事件推送 (WS 内部连接)
+    OB->>CH: OneBot V12 事件推送 (内存 dispatch/ingest)
     CH->>CH: 入站滑动防抖缓冲 (Text 5s / Media 10s)
     CH->>CH: startTyping() 开启 4s 输入心跳
     CH->>CH: 获取 Session 单飞互斥锁排队
@@ -74,8 +74,8 @@ channels/
 ### 2.1 OneBotsGateway (内嵌网关单例)
 - **定位**：Node.js 内部唯一的 OneBots 运行时代理，负责与 OneBots 的 `BaseApp` 打交道。
 - **职责**：
-  1. **内部端口绑定**：仅监听 `127.0.0.1:${ONEBOTS_PORT || 5727}`，不对外暴露公网端口；
-  2. **适配器按需加载**：动态导入并注册 `@onebots/adapter-wechat-clawbot`、`@onebots/adapter-feishu`、`@onebots/adapter-telegram`；
+  1. **进程内传输**：不启动 OneBots HTTP/WS 监听；V12 事件通过 `dispatch -> ingest`、动作通过 `protocol.apply()` 在内存中直接传递；
+  2. **适配器按需加载**：第一阶段动态导入并注册 `@onebots/adapter-wechat-clawbot`；飞书与 Telegram 在第三阶段再增加依赖和凭据表单；
   3. **协议提供**：注册 `@onebots/protocol-onebot-v12` 协议转换器；
   4. **扫码事件汇聚中心**：
      - 维护一个内存 Map：`qrSessions: Map<accountId, { qrCodeUrl, qrcode, status, timer }>`；
@@ -85,7 +85,7 @@ channels/
 ### 2.2 OneBotChannel (通用业务渠道)
 - **定位**：继承自 `BaseChannel`，作为连接 OneBots 协议层与 MioChat Agent 业务层的标准桥梁。
 - **职责**：
-  1. **底层通信**：使用官方客户端 `@imhelper/onebot-v12` 连接内部 `ws://127.0.0.1:5727/...`；
+  1. **底层通信**：使用官方客户端 `@imhelper/onebot-v12` 的 `manual` 接收模式，无 socket 和端口占用；
   2. **消息入站**：接收 `message.private` 和 `message.group`，解构文本与媒体段，推入 `this.enqueueInboundDebounce()`；
   3. **下行发送**：
      - 实现 `doSendMessage`：调用 `client.sendMessage(...)` 发送文本；
@@ -95,6 +95,13 @@ channels/
 ---
 
 ## 3. 详细接口设计与生命周期约定
+
+### 3.0 渐进式启用
+
+为了不在升级后立即切换已有微信账号，旧 `type: wechat` 记录默认仍使用自研 iLink 驱动。可通过以下任一方式显式启用 OneBots：
+
+- 新建 `type: onebots` 的渠道（当前默认映射到 `wechat-clawbot`）；
+- 部署时设置 `MIO_WECHAT_DRIVER=onebots`，让现有管理面的 `wechat` 流程无需前端修改即切换到 OneBots。
 
 ### 3.1 OneBotsGateway 规范签名
 ```ts
@@ -167,14 +174,11 @@ export class ChannelRuntime {
     "node": ">=24.0.0"
   },
   "dependencies": {
-    "onebots": "^0.5.0",
-    "@onebots/core": "^0.5.0",
-    "@onebots/protocol-onebot-v12": "^0.5.0",
-    "@onebots/adapter-wechat-clawbot": "^0.5.0",
-    "@onebots/adapter-feishu": "^0.5.0",
-    "@onebots/adapter-telegram": "^0.5.0",
-    "@imhelper/onebot-v12": "^0.5.0",
-    "imhelper": "^0.5.0"
+    "onebots": "1.2.12",
+    "@onebots/protocol-onebot-v12": "3.0.12",
+    "@onebots/adapter-wechat-clawbot": "3.0.12",
+    "@imhelper/onebot-v12": "1.0.9",
+    "imhelper": "1.0.9"
   }
 }
 ```
@@ -182,7 +186,7 @@ export class ChannelRuntime {
 ### 4.2 环境与构建考量
 - **Node.js 24 兼容性**：OxLint、Prettier 以及现存测试套件（`node:test`）在 Node 24 下表现优异；
 - **原生模块**：`better-sqlite3`（v12.9.0）在 Node 24 环境下已有完备的预编译二进制或 node-gyp 支持，无需额外 C++ 补丁；
-- **配置持久化**：OneBots 各适配器的 Session 文件（如微信凭证）统一配置存放在 `data/onebots/{platform}/{account_id}.json`，与 MioChat 原生数据目录规范统一。
+- **配置持久化**：嵌入式网关配置与 SQLite 数据存放在 `channels-data/onebots/`；当前上游 `wechat-clawbot` 会话凭证仍按其约定存放在 `data/wechat-clawbot/<account_id>.json`，两个目录均已被 Git 忽略。
 
 ---
 

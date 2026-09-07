@@ -1,0 +1,159 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
+import {
+  OneBotsGateway,
+  normalizeIlinkInboundPacket,
+} from '../../channels/onebots/OneBotsGateway.js'
+import { isOneBotsChannel } from '../../channels/onebots/config.js'
+
+class FakeProtocol extends EventEmitter {
+  async apply(action, params) {
+    return { action, params }
+  }
+}
+
+class FakeClient extends EventEmitter {
+  ingest(event) {
+    this.events ??= []
+    this.events.push(event)
+  }
+}
+
+class FakeAccount extends EventEmitter {
+  constructor(id) {
+    super()
+    this.account_id = id
+    this.status = 'pending'
+    this.client = new EventEmitter()
+    this.client.ingest = packet => { this.ingested = packet }
+    this.protocols = [new FakeProtocol()]
+    this.starts = 0
+    this.stops = 0
+  }
+
+  async start() {
+    this.starts += 1
+    this.client.emit('qr', { qrCodeUrl: 'https://example.test/qr', qrcode: 'bitmap' })
+    this.client.emit('login', { accountId: 'wx-user' })
+    this.status = 'online'
+    this.client.emit('ready')
+  }
+
+  async stop() {
+    this.stops += 1
+    this.status = 'offline'
+    this.removeAllListeners()
+  }
+}
+
+function makeApp() {
+  const accounts = new Map()
+  const adapter = {
+    accounts,
+    createAccount(config) {
+      const account = new FakeAccount(config.account_id)
+      accounts.set(config.account_id, account)
+      return account
+    },
+  }
+  return {
+    adapters: new Map([['wechat-clawbot', adapter]]),
+    async addAccount(config) {
+      adapter.createAccount(config)
+    },
+    getLogger() {
+      return console
+    },
+    async stop() {},
+  }
+}
+
+test('OneBots rollout stays explicit and supports the legacy-wechat feature flag', () => {
+  assert.equal(isOneBotsChannel({ type: 'wechat' }, {}), false)
+  assert.equal(isOneBotsChannel({ type: 'onebots' }, {}), true)
+  assert.equal(isOneBotsChannel({ type: 'wechat' }, { MIO_WECHAT_DRIVER: 'onebots' }), true)
+})
+
+test('blank iLink group_id is normalized as a private event', () => {
+  const withNull = { message_type: 1, from_user_id: 'user', group_id: null }
+  const withBlank = { message_type: 1, from_user_id: 'user', group_id: '  ' }
+  const withGroup = { message_type: 1, from_user_id: 'user', group_id: 'group-1' }
+  const withInvalidType = { message_type: 1, from_user_id: 'user', group_id: 42 }
+
+  assert.equal(Object.hasOwn(normalizeIlinkInboundPacket(withNull), 'group_id'), false)
+  assert.equal(Object.hasOwn(normalizeIlinkInboundPacket(withBlank), 'group_id'), false)
+  assert.equal(normalizeIlinkInboundPacket(withGroup), withGroup)
+  assert.equal(normalizeIlinkInboundPacket(withInvalidType), withInvalidType)
+})
+
+test('OneBotsGateway mounts an account, bridges QR/ready state, and is idempotent', async () => {
+  const app = makeApp()
+  const gateway = new OneBotsGateway({
+    app,
+    skipRegistration: true,
+    clientFactory: async () => new FakeClient(),
+  })
+
+  await gateway.init()
+  const first = await gateway.startAccount({ id: 'channel-1', platform: 'wechat-clawbot' })
+  const second = await gateway.startAccount({ id: 'channel-1', platform: 'wechat-clawbot' })
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.equal(first, second)
+  const account = app.adapters.get('wechat-clawbot').accounts.get('channel-1')
+  assert.equal(account.starts, 1)
+  await account.client.ingest({ message_type: 1, from_user_id: 'user', group_id: null })
+  assert.equal(Object.hasOwn(account.ingested, 'group_id'), false)
+  assert.equal(gateway.getAccountState('channel-1').status, 'online')
+  assert.equal(gateway.getAccountState('channel-1').ready, true)
+  // A QR is no longer active after login.
+  assert.equal(gateway.qrSessions.has('channel-1'), false)
+  assert.equal(gateway.getQrCode('channel-1'), null)
+
+  await gateway.dispose()
+  assert.equal(gateway.disposed, true)
+  assert.equal(app.adapters.get('wechat-clawbot').accounts.has('channel-1'), false)
+})
+
+test('OneBotsGateway creates a manual in-process client and routes actions/events', async () => {
+  const app = makeApp()
+  const gateway = new OneBotsGateway({
+    app,
+    skipRegistration: true,
+    clientFactory: async config => {
+      const client = new FakeClient()
+      client.config = config
+      return client
+    },
+  })
+  await gateway.startAccount({ id: 'channel-2', platform: 'wechat-clawbot' })
+  const client = await gateway.createClient('channel-2')
+  const response = await client.config.call('ping', { value: 1 })
+  assert.deepEqual(response, { action: 'ping', params: { value: 1 } })
+
+  const account = app.adapters.get('wechat-clawbot').accounts.get('channel-2')
+  account.protocols[0].emit('dispatch', JSON.stringify({ type: 'meta', detail_type: 'heartbeat' }))
+  assert.deepEqual(client.events, [{ type: 'meta', detail_type: 'heartbeat' }])
+  assert.equal(client.config.receiveMode, 'manual')
+  assert.match(client.config.baseUrl, /^http:\/\/127\.0\.0\.1:/)
+  await gateway.stopAccount('channel-2')
+  assert.equal(gateway.getAccountState('channel-2').status, 'offline')
+  await gateway.dispose()
+})
+
+test('background login failures are captured without unhandled rejection', async () => {
+  const app = makeApp()
+  app.adapters.get('wechat-clawbot').createAccount = config => {
+    const result = new FakeAccount(config.account_id)
+    result.start = async () => { throw new Error('login failed') }
+    app.adapters.get('wechat-clawbot').accounts.set(config.account_id, result)
+    return result
+  }
+  const gateway = new OneBotsGateway({ app, skipRegistration: true })
+  await gateway.startAccount({ id: 'channel-3', platform: 'wechat-clawbot' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(gateway.getAccountState('channel-3').status, 'error')
+  assert.equal(gateway.getAccountState('channel-3').error, 'login failed')
+  await gateway.dispose()
+})

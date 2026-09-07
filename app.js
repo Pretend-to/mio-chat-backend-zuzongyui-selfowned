@@ -241,6 +241,19 @@ async function gracefulShutdown(signal) {
     } catch (error) {
       logger.warn('Socket.IO 服务器关闭时出现警告:', error.message)
     }
+
+    // 1.5. 停止渠道轮询、OneBots 账号与进程内协议资源
+    try {
+      const { getChannelRuntime } = await import('./lib/server/http/controllers/channelController.js')
+      const channelRuntime = getChannelRuntime()
+      if (typeof channelRuntime?.dispose === 'function') {
+        logger.info('正在关闭渠道运行时...')
+        await channelRuntime.dispose()
+        logger.info('渠道运行时已关闭')
+      }
+    } catch (error) {
+      logger.warn('渠道运行时关闭时出现警告:', error.message)
+    }
     
     // 2. 停止接受新连接并强制关闭现有连接
     try {
@@ -345,6 +358,9 @@ async function startApp() {
     // 自动恢复上次 running 状态的渠道（持久化开关）
     const channelRuntime = getChannelRuntime()
     try {
+      // OneBots 通道需先恢复进程内网关与账号；旧 iLink 通道继续
+      // 由 restoreRunningChannels 处理，两条路径互不重复。
+      if (typeof channelRuntime.init === 'function') await channelRuntime.init()
       const { restoreRunningChannels } = await import('./channels/restoreRunningChannels.js')
       await restoreRunningChannels(channelRuntime, logger)
     } catch (e) {

@@ -5,7 +5,7 @@
   "version": "0.0.1",
   "description": "AI-Powered chat platform,support ONEBOT v11",
   "engines": {
-    "node": ">=20.19.0 || >=22.12.0 || >=24.0.0"
+    "node": ">=24.0.0"
   },
   "main": "index.js",
   "scripts": {
@@ -40,8 +40,11 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1095.0",
     "@aws-sdk/lib-storage": "^3.1095.0",
+    "@imhelper/onebot-v12": "1.0.9",
     "@lobehub/icons": "^5.8.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@onebots/adapter-wechat-clawbot": "3.0.12",
+    "@onebots/protocol-onebot-v12": "3.0.12",
     "@prisma/adapter-better-sqlite3": "^7.9.0",
     "@prisma/client": "^7.9.0",
     "@prisma/client-runtime-utils": "^7.9.0",
@@ -57,6 +60,7 @@
     "file-type": "^21.3.4",
     "google-auth-library": "^9.15.1",
     "htm": "^3.1.1",
+    "imhelper": "1.0.9",
     "js-yaml": "^4.3.1",
     "multer": "^2.2.0",
     "node-cron": "^3.0.3",
@@ -64,6 +68,7 @@
     "node-pty": "^1.1.0-beta21",
     "nodemailer": "^9.0.3",
     "officeparser": "^5.2.2",
+    "onebots": "1.2.12",
     "openai": "^6.49.0",
     "puppeteer-core": "^25.3.0",
     "silk-wasm": "^3.7.1",
@@ -88,6 +93,7 @@
     "onlyBuiltDependencies": [
       "better-sqlite3",
       "node-pty",
+      "@karinjs/node-pty",
       "prisma",
       "@prisma/engines"
     ],
