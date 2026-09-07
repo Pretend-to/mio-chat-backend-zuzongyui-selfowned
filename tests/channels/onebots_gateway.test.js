@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { BaseApp } from 'onebots'
+import '@onebots/adapter-wechat-clawbot'
 import {
   OneBotsGateway,
   normalizeIlinkInboundPacket,
@@ -85,6 +87,44 @@ test('blank iLink group_id is normalized as a private event', () => {
   assert.equal(Object.hasOwn(normalizeIlinkInboundPacket(withBlank), 'group_id'), false)
   assert.equal(normalizeIlinkInboundPacket(withGroup), withGroup)
   assert.equal(normalizeIlinkInboundPacket(withInvalidType), withInvalidType)
+})
+
+test('WeChat ClawBot accounts preserve Markdown by default and allow an explicit override', () => {
+  const gateway = new OneBotsGateway({ app: makeApp(), skipRegistration: true })
+  const defaults = gateway.normalizeChannelConfig({ id: 'markdown-default' })
+  const explicitPlain = gateway.normalizeChannelConfig({
+    id: 'plain-override',
+    config: { outbound_text_format: 'plain' },
+  })
+
+  assert.equal(defaults.outbound_text_format, 'markdown')
+  assert.equal(explicitPlain.outbound_text_format, 'plain')
+})
+
+test('patched iLink sender passes Markdown through without collapsing line breaks', async () => {
+  const app = new BaseApp({
+    port: 6727,
+    host: '127.0.0.1',
+    log_level: 'warn',
+    general: {},
+  })
+  const adapter = app.findOrCreateAdapter('wechat-clawbot')
+  const account = adapter.createAccount({
+    platform: 'wechat-clawbot',
+    account_id: 'markdown-runtime',
+    receive_mode: 'manual',
+    outbound_text_format: 'markdown',
+  })
+  const client = account.client
+  let envelope
+  client.transport.dispatchOutboundEnvelope = async value => { envelope = value }
+  const markdown = '\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n```js\nconst x = 1\n```\n'
+
+  assert.equal(client.getConfig().outbound_text_format, 'markdown')
+  await client.outbound.postText('peer', 'reply-context', markdown)
+
+  assert.equal(envelope.msg.item_list[0].text_item.text, markdown)
+  await app.stop()
 })
 
 test('OneBotsGateway mounts an account, bridges QR/ready state, and is idempotent', async () => {

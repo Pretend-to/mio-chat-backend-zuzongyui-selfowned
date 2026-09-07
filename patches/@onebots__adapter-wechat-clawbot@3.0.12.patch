@@ -1,0 +1,359 @@
+diff --git a/lib/adapter.js b/lib/adapter.js
+index 8f85f8a111044c1e4caa07322e885bc0e532c6c7..e276ce23792d6f8cf19dd3a1d42ce6ace1b6efce 100644
+--- a/lib/adapter.js
++++ b/lib/adapter.js
+@@ -203,6 +203,7 @@ export class WechatClawbotAdapter extends Adapter {
+         const wc = {
+             account_id: config.account_id,
+             receive_mode: config.receive_mode,
++            outbound_text_format: config.outbound_text_format,
+             base_url: ILINK_HTTP_ORIGIN_DEFAULT,
+             cdn_base_url: ILINK_CDN_ROOT_DEFAULT,
+             bot_type: ILINK_QR_BOT_CLASS_DEFAULT,
+diff --git a/lib/bot.js b/lib/bot.js
+index 6f866f9092fe65e6b9c95778a2275ec313e40471..db1550c12410584a2a23710a6a28e280fc0b57a0 100644
+--- a/lib/bot.js
++++ b/lib/bot.js
+@@ -47,6 +47,7 @@ export class WechatIlinkBot extends IlinkBot {
+             polling: false,
+             contextTokenStore: store,
+             contextTokenAccountKey: store ? config.account_id : undefined,
++            outboundTextFormat: config.outbound_text_format,
+         });
+         this.cfg = config;
+         this.on("credential_stale", (_err) => {
+diff --git a/lib/config.js b/lib/config.js
+index 0e97d097b7e8a4226abba7b269aaf3901e7b2389..74b664a39a363c654ddfdd855464edab131d535b 100644
+--- a/lib/config.js
++++ b/lib/config.js
+@@ -7,6 +7,10 @@ export function assertWechatClawbotConfig(config) {
+     if (config.receive_mode !== undefined && !["polling", "manual"].includes(config.receive_mode)) {
+         throw new GatewayFault("INVALID_CONFIG", "微信 ClawBot receive_mode 必须是 polling 或 manual");
+     }
++    if (config.outbound_text_format !== undefined &&
++        !["plain", "markdown"].includes(config.outbound_text_format)) {
++        throw new GatewayFault("INVALID_CONFIG", "微信 ClawBot outbound_text_format 必须是 plain 或 markdown");
++    }
+     assertIntegerRange("qr_login_timeout_ms", config.qr_login_timeout_ms, 60_000);
+     assertIntegerRange("polling_timeout_ms", config.polling_timeout_ms, 1_000);
+     assertIntegerRange("polling_retry_initial_delay_ms", config.polling_retry_initial_delay_ms, 100);
+diff --git a/lib/index.d.ts b/lib/index.d.ts
+index 3e1dc393f3625b6ef4d0f4e70719d0d3c821d414..777b9bc7ad6b969dcd3f2a33e6a4c1dc7965a5fd 100644
+--- a/lib/index.d.ts
++++ b/lib/index.d.ts
+@@ -7,6 +7,7 @@ export * from "./events.js";
+ export * from "./messages.js";
+ export * from "./platform-actions.js";
+ export * from "./sdk/ilink-bot.js";
++export type { IlinkBotOptions, OutboundTextFormat } from "./sdk/ilink-options.js";
+ export type { IlinkBotEvents, IlinkInboundEventName, IlinkListenerErrorEvent, IlinkQrEvent, } from "./sdk/ilink-events.js";
+ export * from "./sdk/ilink-types.js";
+ export { GatewayFault, MissingReplyLaneFault, StaleCredentialFault, type GatewayFaultOptions, } from "./sdk/internal/errors.js";
+diff --git a/lib/index.js b/lib/index.js
+index 29f0eb08f38b49306f36629c55baa3e55c112d35..3b265255c2a2211ec2e099147b23273d120acdc7 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -29,6 +29,17 @@ export const wechatClawbotSchema = {
+         description: "manual 保留登录与出站能力，但不启动 getupdates；由宿主调用 bot.ingest()",
+         ui: { section: "transport" },
+     },
++    outbound_text_format: {
++        type: "string",
++        default: "plain",
++        label: "出站文本格式",
++        choices: [
++            { value: "plain", label: "纯文本（保留换行）" },
++            { value: "markdown", label: "Markdown 原样透传" },
++        ],
++        description: "plain 会移除常见 Markdown 标记但保留段落；markdown 将原文交给客户端渲染",
++        ui: { section: "advanced" },
++    },
+     qr_login_timeout_ms: {
+         type: "number",
+         default: 480000,
+diff --git a/lib/sdk/ilink-bot.d.ts b/lib/sdk/ilink-bot.d.ts
+index d8bf3cabd2a5a96caae1b90e95021d9b247888b2..a42405e3ac8e7ecf7dadae26e6bbdc415ddfe1ac 100644
+--- a/lib/sdk/ilink-bot.d.ts
++++ b/lib/sdk/ilink-bot.d.ts
+@@ -20,6 +20,7 @@ export declare class IlinkBot extends EventEmitter<IlinkBotEvents> {
+     private readonly receivedEvents;
+     private readonly contextTokenStore?;
+     private readonly contextTokenAccountKey?;
++    private readonly outbound;
+     private didMigrateContextTokensFromFile;
+     private contextTokensCarryover;
+     constructor(options?: IlinkBotOptions);
+diff --git a/lib/sdk/ilink-bot.js b/lib/sdk/ilink-bot.js
+index d4a5caff4a0fcaeee98a4afecd78b1aaae7f7528..1642458585a487acc75dcd09785460121d5a5397 100644
+--- a/lib/sdk/ilink-bot.js
++++ b/lib/sdk/ilink-bot.js
+@@ -7,7 +7,7 @@ import { materializeUserSuppliedFile } from "./internal/load-bytes.js";
+ import { AuthorKind, UploadKind } from "./protocol/wire-models.js";
+ import { mapInboundWirePacket } from "./protocol/inbound-mapper.js";
+ import { allocateLoginTicket, awaitLoginTicketResolution } from "./login/qr-handshake.js";
+-import { postFileBundle, postLiteralReply, postPhotoBundle, postVideoBundle, } from "./outbound/assembler.js";
++import { createOutboundSender } from "./outbound/assembler.js";
+ import { IlinkJsonTransport } from "./transport/ilink-json-transport.js";
+ import { JsonFileCredentialStore, MemoryCredentialStore } from "./state/persist.js";
+ import { pullUserMediaAttachment, stageBinaryForPeer, mapMimeFamilyToUploadKind, } from "./cdn/payload-pipeline.js";
+@@ -32,6 +32,7 @@ export class IlinkBot extends EventEmitter {
+     receivedEvents = new RecentEventDeduplicator();
+     contextTokenStore;
+     contextTokenAccountKey;
++    outbound;
+     didMigrateContextTokensFromFile = false;
+     contextTokensCarryover = null;
+     constructor(options = {}) {
+@@ -61,6 +62,7 @@ export class IlinkBot extends EventEmitter {
+         this.typing = new IlinkTypingRuntime(this.transport);
+         this.contextTokenStore = options.contextTokenStore;
+         this.contextTokenAccountKey = options.contextTokenAccountKey;
++        this.outbound = createOutboundSender(this.transport, options.outboundTextFormat ?? "plain");
+         this.pollKnobs =
+             typeof options.polling === "object"
+                 ? options.polling
+@@ -231,7 +233,7 @@ export class IlinkBot extends EventEmitter {
+     async sendTextToUser(chatId, text, options = {}) {
+         await this.ensureSessionLoaded();
+         const ctx = await this.obtainReplyContext(chatId, options.contextToken);
+-        return postLiteralReply(this.transport, chatId, ctx, text);
++        return this.outbound.postText(chatId, ctx, text);
+     }
+     async sendPhotoToUser(chatId, input, options = {}) {
+         await this.ensureSessionLoaded();
+@@ -244,7 +246,7 @@ export class IlinkBot extends EventEmitter {
+             filename: options.filename,
+             contentType: options.contentType,
+         });
+-        const mid = await postPhotoBundle(this.transport, chatId, ctx, staged, options.caption);
++        const mid = await this.outbound.postPhoto(chatId, ctx, staged, options.caption);
+         return { messageId: mid };
+     }
+     async sendVideoToUser(chatId, input, options = {}) {
+@@ -258,7 +260,7 @@ export class IlinkBot extends EventEmitter {
+             filename: options.filename,
+             contentType: options.contentType,
+         });
+-        const mid = await postVideoBundle(this.transport, chatId, ctx, staged, options.caption);
++        const mid = await this.outbound.postVideo(chatId, ctx, staged, options.caption);
+         return { messageId: mid };
+     }
+     async sendDocumentToUser(chatId, input, options = {}) {
+@@ -276,7 +278,7 @@ export class IlinkBot extends EventEmitter {
+             filename: blob.fileName,
+             contentType: blob.contentType,
+         });
+-        const mid = await postFileBundle(this.transport, chatId, ctx, staged, options.caption);
++        const mid = await this.outbound.postFile(chatId, ctx, staged, options.caption);
+         return { messageId: mid };
+     }
+     async sendTypingToUser(chatId, options = {}) {
+diff --git a/lib/sdk/ilink-options.d.ts b/lib/sdk/ilink-options.d.ts
+index af39d8bcda7ac6a22a4c8ac0694c02be5f750819..103ddefc6d16ed66275a3ef64eac0e932245b794 100644
+--- a/lib/sdk/ilink-options.d.ts
++++ b/lib/sdk/ilink-options.d.ts
+@@ -1,5 +1,6 @@
+ import type { ClawbotContextTokenStore } from "../context-token-store.js";
+ import type { CredentialBlob, PollingOptions, SessionStore } from "./protocol/chat-event.js";
++export type OutboundTextFormat = "plain" | "markdown";
+ export interface IlinkBotOptions {
+     session?: Partial<CredentialBlob> | null;
+     sessionStore?: SessionStore | string;
+@@ -9,6 +10,8 @@ export interface IlinkBotOptions {
+     cdnBaseUrl?: string;
+     routeTag?: string;
+     polling?: boolean | PollingOptions;
++    /** 出站文本格式；plain 去除 Markdown 标记但保留换行，markdown 原样透传。 */
++    outboundTextFormat?: OutboundTextFormat;
+     /** context_token 由宿主统一存储时注入；SDK 不再把它写入会话 JSON。 */
+     contextTokenStore?: ClawbotContextTokenStore;
+     /** 宿主中的稳定账号键，与 contextTokenStore 成对使用。 */
+diff --git a/lib/sdk/internal/markdown-lite.d.ts b/lib/sdk/internal/markdown-lite.d.ts
+index e896d034c64fff88c3430eec65719dd947287ab6..11d5d6ef3088084bee293c2fd8264306e1adcd14 100644
+--- a/lib/sdk/internal/markdown-lite.d.ts
++++ b/lib/sdk/internal/markdown-lite.d.ts
+@@ -1,3 +1,6 @@
+-/** 将常见 Markdown 压成纯文本 */
++import type { OutboundTextFormat } from "../ilink-options.js";
++/** 将常见 Markdown 转成纯文本，同时保留适合聊天阅读的段落换行。 */
+ export declare function coercePlainMarkdown(source: string): string;
++/** 按账号配置选择 Markdown 原样透传或兼容纯文本。 */
++export declare function formatOutboundText(source: string, format?: OutboundTextFormat): string;
+ //# sourceMappingURL=markdown-lite.d.ts.map
+diff --git a/lib/sdk/internal/markdown-lite.js b/lib/sdk/internal/markdown-lite.js
+index 7537a687b7def5b383211790108e6e21d916a947..3e3adc2f0d2ca7d06c32a74ac18fa3b44f3d49dd 100644
+--- a/lib/sdk/internal/markdown-lite.js
++++ b/lib/sdk/internal/markdown-lite.js
+@@ -1,4 +1,4 @@
+-/** 将常见 Markdown 压成纯文本 */
++/** 将常见 Markdown 转成纯文本，同时保留适合聊天阅读的段落换行。 */
+ export function coercePlainMarkdown(source) {
+     const lines = source.split(/\r?\n/);
+     const acc = [];
+@@ -16,11 +16,14 @@ export function coercePlainMarkdown(source) {
+         line = line.replace(/!\[[^\]]*]\([^)]*\)/g, "");
+         line = line.replace(/\[([^\]]+)]\([^)]*\)/g, "$1");
+         line = line.replace(/[*_~]+/g, "");
+-        if (line.trim())
+-            acc.push(line.trimEnd());
++        acc.push(line.trimEnd());
+     }
+-    let flat = acc.join("\n").replace(/\|/g, " ");
+-    flat = flat.replace(/\s+/g, " ");
+-    return flat.trim();
++    let plain = acc.join("\n").replace(/\|/g, " ");
++    plain = plain.replace(/[^\S\r\n]+/g, " ").replace(/\n{3,}/g, "\n\n");
++    return plain.trim();
++}
++/** 按账号配置选择 Markdown 原样透传或兼容纯文本。 */
++export function formatOutboundText(source, format = "plain") {
++    return format === "markdown" ? source : coercePlainMarkdown(source);
+ }
+ //# sourceMappingURL=markdown-lite.js.map
+diff --git a/lib/sdk/outbound/assembler.d.ts b/lib/sdk/outbound/assembler.d.ts
+index 4acbd6ca05149bbf72c6b871efc6b90546cbaa78..dba5ce7c212fdf794db39b6092cf24611d294654 100644
+--- a/lib/sdk/outbound/assembler.d.ts
++++ b/lib/sdk/outbound/assembler.d.ts
+@@ -1,11 +1,21 @@
+ import type { IlinkJsonTransport } from "../transport/ilink-json-transport.js";
++import type { OutboundTextFormat } from "../ilink-options.js";
+ import type { OutboundWireEnvelope } from "../protocol/wire-models.js";
+ import type { StagedCipherPayload } from "../cdn/payload-pipeline.js";
+-export declare function packLiteralReply(peerKey: string, contextToken: string, markdown: string): OutboundWireEnvelope;
+-export declare function postLiteralReply(transport: IlinkJsonTransport, peerKey: string, contextToken: string, markdown: string): Promise<{
++export declare function packLiteralReply(peerKey: string, contextToken: string, markdown: string, textFormat?: OutboundTextFormat): OutboundWireEnvelope;
++export declare function postLiteralReply(transport: IlinkJsonTransport, peerKey: string, contextToken: string, markdown: string, textFormat?: OutboundTextFormat): Promise<{
+     messageId: string;
+ }>;
+-export declare function postPhotoBundle(transport: IlinkJsonTransport, peerKey: string, contextToken: string, staged: StagedCipherPayload, caption?: string): Promise<string>;
+-export declare function postVideoBundle(transport: IlinkJsonTransport, peerKey: string, contextToken: string, staged: StagedCipherPayload, caption?: string): Promise<string>;
+-export declare function postFileBundle(transport: IlinkJsonTransport, peerKey: string, contextToken: string, staged: StagedCipherPayload, caption?: string): Promise<string>;
++export declare function postPhotoBundle(transport: IlinkJsonTransport, peerKey: string, contextToken: string, staged: StagedCipherPayload, caption?: string, textFormat?: OutboundTextFormat): Promise<string>;
++export declare function postVideoBundle(transport: IlinkJsonTransport, peerKey: string, contextToken: string, staged: StagedCipherPayload, caption?: string, textFormat?: OutboundTextFormat): Promise<string>;
++export declare function postFileBundle(transport: IlinkJsonTransport, peerKey: string, contextToken: string, staged: StagedCipherPayload, caption?: string, textFormat?: OutboundTextFormat): Promise<string>;
++/** 将传输层与文本格式绑定为单个出站发送器，避免调用方重复传递策略。 */
++export declare function createOutboundSender(transport: IlinkJsonTransport, textFormat: OutboundTextFormat): {
++    postText: (peerKey: string, contextToken: string, markdown: string) => Promise<{
++        messageId: string;
++    }>;
++    postPhoto: (peerKey: string, contextToken: string, staged: StagedCipherPayload, caption?: string) => Promise<string>;
++    postVideo: (peerKey: string, contextToken: string, staged: StagedCipherPayload, caption?: string) => Promise<string>;
++    postFile: (peerKey: string, contextToken: string, staged: StagedCipherPayload, caption?: string) => Promise<string>;
++};
+ //# sourceMappingURL=assembler.d.ts.map
+diff --git a/lib/sdk/outbound/assembler.js b/lib/sdk/outbound/assembler.js
+index ed65dce606acb36e2be55e9558c42edaf30b57f9..1b887f829ae060fbf5cd689ce0933b7f67fe6800 100644
+--- a/lib/sdk/outbound/assembler.js
++++ b/lib/sdk/outbound/assembler.js
+@@ -1,4 +1,4 @@
+-import { coercePlainMarkdown } from "../internal/markdown-lite.js";
++import { formatOutboundText } from "../internal/markdown-lite.js";
+ import { nextOutboundClientMarker } from "../internal/random-tags.js";
+ import { AuthorKind, ItemKind, OutboxPhase } from "../protocol/wire-models.js";
+ async function emitIsolatedFacet(transport, peerKey, contextToken, facet) {
+@@ -24,8 +24,8 @@ async function emitFacetChain(transport, peerKey, contextToken, facets) {
+     }
+     return last;
+ }
+-export function packLiteralReply(peerKey, contextToken, markdown) {
+-    const flat = coercePlainMarkdown(markdown);
++export function packLiteralReply(peerKey, contextToken, markdown, textFormat = "plain") {
++    const formatted = formatOutboundText(markdown, textFormat);
+     return {
+         msg: {
+             from_user_id: "",
+@@ -33,20 +33,25 @@ export function packLiteralReply(peerKey, contextToken, markdown) {
+             client_id: nextOutboundClientMarker(),
+             message_type: AuthorKind.Bot,
+             message_state: OutboxPhase.Settled,
+-            item_list: flat ? [{ type: ItemKind.Text, text_item: { text: flat } }] : undefined,
++            item_list: formatted
++                ? [{ type: ItemKind.Text, text_item: { text: formatted } }]
++                : undefined,
+             context_token: contextToken,
+         },
+     };
+ }
+-export async function postLiteralReply(transport, peerKey, contextToken, markdown) {
+-    const envelope = packLiteralReply(peerKey, contextToken, markdown);
++export async function postLiteralReply(transport, peerKey, contextToken, markdown, textFormat = "plain") {
++    const envelope = packLiteralReply(peerKey, contextToken, markdown, textFormat);
+     await transport.dispatchOutboundEnvelope(envelope);
+     return { messageId: envelope.msg?.client_id ?? "" };
+ }
+-export async function postPhotoBundle(transport, peerKey, contextToken, staged, caption) {
++export async function postPhotoBundle(transport, peerKey, contextToken, staged, caption, textFormat = "plain") {
+     const chain = [];
+     if (caption) {
+-        chain.push({ type: ItemKind.Text, text_item: { text: coercePlainMarkdown(caption) } });
++        chain.push({
++            type: ItemKind.Text,
++            text_item: { text: formatOutboundText(caption, textFormat) },
++        });
+     }
+     chain.push({
+         type: ItemKind.Image,
+@@ -61,10 +66,13 @@ export async function postPhotoBundle(transport, peerKey, contextToken, staged,
+     });
+     return emitFacetChain(transport, peerKey, contextToken, chain);
+ }
+-export async function postVideoBundle(transport, peerKey, contextToken, staged, caption) {
++export async function postVideoBundle(transport, peerKey, contextToken, staged, caption, textFormat = "plain") {
+     const chain = [];
+     if (caption) {
+-        chain.push({ type: ItemKind.Text, text_item: { text: coercePlainMarkdown(caption) } });
++        chain.push({
++            type: ItemKind.Text,
++            text_item: { text: formatOutboundText(caption, textFormat) },
++        });
+     }
+     chain.push({
+         type: ItemKind.Video,
+@@ -79,10 +87,13 @@ export async function postVideoBundle(transport, peerKey, contextToken, staged,
+     });
+     return emitFacetChain(transport, peerKey, contextToken, chain);
+ }
+-export async function postFileBundle(transport, peerKey, contextToken, staged, caption) {
++export async function postFileBundle(transport, peerKey, contextToken, staged, caption, textFormat = "plain") {
+     const chain = [];
+     if (caption) {
+-        chain.push({ type: ItemKind.Text, text_item: { text: coercePlainMarkdown(caption) } });
++        chain.push({
++            type: ItemKind.Text,
++            text_item: { text: formatOutboundText(caption, textFormat) },
++        });
+     }
+     chain.push({
+         type: ItemKind.File,
+@@ -98,4 +109,13 @@ export async function postFileBundle(transport, peerKey, contextToken, staged, c
+     });
+     return emitFacetChain(transport, peerKey, contextToken, chain);
+ }
++/** 将传输层与文本格式绑定为单个出站发送器，避免调用方重复传递策略。 */
++export function createOutboundSender(transport, textFormat) {
++    return {
++        postText: (peerKey, contextToken, markdown) => postLiteralReply(transport, peerKey, contextToken, markdown, textFormat),
++        postPhoto: (peerKey, contextToken, staged, caption) => postPhotoBundle(transport, peerKey, contextToken, staged, caption, textFormat),
++        postVideo: (peerKey, contextToken, staged, caption) => postVideoBundle(transport, peerKey, contextToken, staged, caption, textFormat),
++        postFile: (peerKey, contextToken, staged, caption) => postFileBundle(transport, peerKey, contextToken, staged, caption, textFormat),
++    };
++}
+ //# sourceMappingURL=assembler.js.map
+diff --git a/lib/types.d.ts b/lib/types.d.ts
+index f898344cab905dbbd7aafe1a71dd31d967910600..27fbec3967c2036aab8ae401377b032f9a652855 100644
+--- a/lib/types.d.ts
++++ b/lib/types.d.ts
+@@ -1,3 +1,4 @@
++import type { OutboundTextFormat } from "./sdk/ilink-options.js";
+ /**
+  * 微信 ClawBot（iLink Bot HTTP）适配器配置
+  *
+@@ -15,6 +16,8 @@ export interface WechatClawbotConfig {
+     account_id: string;
+     /** 事件接收方式；manual 由已有 Host 调用 `WechatIlinkBot.ingest()` */
+     receive_mode?: "polling" | "manual";
++    /** 出站文本格式；plain 去 Markdown 标记但保留换行，markdown 原样透传。 */
++    outbound_text_format?: OutboundTextFormat;
+     /** 扫码登录总超时（毫秒），默认 480000 */
+     qr_login_timeout_ms?: number;
+     /** getupdates 长轮询超时（毫秒） */

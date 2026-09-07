@@ -121,6 +121,9 @@
       "find-my-way": ">=9.7.0",
       "engine.io": "6.6.7",
       "deepmerge-ts": ">=8.0.0"
+    },
+    "patchedDependencies": {
+      "@onebots/adapter-wechat-clawbot@3.0.12": "patches/@onebots__adapter-wechat-clawbot@3.0.12.patch"
     }
   }
 }

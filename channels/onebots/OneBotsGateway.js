@@ -122,6 +122,11 @@ export class OneBotsGateway {
       ...channelConfig.config,
       platform,
       account_id: id,
+      ...(platform === 'wechat-clawbot' && {
+        outbound_text_format: channelConfig.config?.outbound_text_format
+          ?? credentials.outbound_text_format
+          ?? 'markdown',
+      }),
       [ONEBOTS_PROTOCOL]: createProtocolConfig(protocol),
     }
   }
