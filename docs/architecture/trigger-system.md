@@ -175,6 +175,8 @@ TriggerExecution 与 Message 不建立强外键。审计记录保存 `sessionId`
 
 - 现有 WakeProtocol/Registry/Runner/Injector/tool 测试在 DB adapter 下继续通过；
 - once 唤醒后 list 不可见，但 Execution 可查询；
+- 已注册哨兵可通过 `sentinel(action="update")` 修改参数、提示模板、冷却和脚本路径；
+  修改 `params`、`sessionId`、`mode` 或 `scriptPath` 时会重启进程以刷新启动环境；
 - 删除 Trigger、Channel 或 Session 后历史 Execution 仍存在；
 - 两个运行 Channel 属于不同 agent 时，永不发生 fallback 误投；
 - payload 超限、脚本异常、超时、日预算和全局预算均有审计；

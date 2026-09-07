@@ -250,7 +250,27 @@ test('sentinel Tool: 两步流创建、试跑、管理全生命周期', async ()
   assert.equal(createRes.trigger.id, 'tool_test_trg')
   assert.equal(createRes.trigger.scriptPath, testScriptPath)
 
-  // 3. 试跑 (run)
+  // 3. 更新哨兵参数并自动重启，使新参数进入 TRIGGER_PARAMS
+  const updateRes = await tool.execute({
+    params: {
+      action: 'update',
+      id: 'tool_test_trg',
+      params: { target: 210 },
+      promptTemplate: 'SOL 更新警报: {{payload.reason}}',
+    },
+    channel: {
+      id: 'sentinel-test-channel',
+      memory: {
+        agentId: 'wechat-master',
+        getActiveSession: async () => 's_test',
+      },
+    },
+  })
+  assert.equal(updateRes.success, true)
+  assert.equal(updateRes.trigger.params.target, 210)
+
+  // 4. 试跑 (run)
+
   const runRes = await tool.execute({
     params: {
       action: 'run',
@@ -259,9 +279,9 @@ test('sentinel Tool: 两步流创建、试跑、管理全生命周期', async ()
   })
   assert.equal(runRes.success, true)
   assert.equal(runRes.result.wake, true)
-  assert.equal(runRes.result.reason, 'SOL 突破 200')
+  assert.equal(runRes.result.reason, 'SOL 突破 210')
 
-  // 4. 列表 (list)
+  // 5. 列表 (list)
   const listRes = await tool.execute({
     params: { action: 'list' },
   })
@@ -273,14 +293,14 @@ test('sentinel Tool: 两步流创建、试跑、管理全生命周期', async ()
     JSON.stringify(found),
   )
 
-  // 5. 校验缺少 scriptPath 时报错
+  // 6. 校验缺少 scriptPath 时报错
   await assert.rejects(async () => {
     await tool.execute({
       params: { action: 'create', id: 'fail_trg' },
     })
   }, /必须提供已落盘的 scriptPath/)
 
-  // 6. 删除 (remove)
+  // 7. 删除 (remove)
   const rmRes = await tool.execute({
     params: { action: 'remove', id: 'tool_test_trg' },
   })

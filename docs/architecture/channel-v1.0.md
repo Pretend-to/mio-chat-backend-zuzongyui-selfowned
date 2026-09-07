@@ -83,7 +83,7 @@ session、archive、soul、global memory、meta、Trigger、Execution 和脚本�
 - **唤醒协议**：向绑定 session 追加 user 消息（首行 `system：trigger 系统监测到事件...`），身份随 session，LLM 无关
 - **脚本契约**：stdout `@WAKE@ {json}` 标志行，语言不限
 - **生命周期**：once（唤醒即删）/ persistent（长期运行）
-- **管理工具**：`trigger_manage`（create/list/remove/enable/disable/run_once）+ `/triggers` slash 命令
+- **管理工具**：`sentinel`（create/update/list/remove/enable/disable/run/logs）+ `/triggers` slash 命令
 - **当前存储**：JSON 文件；DB adapter、软删除与审计外键语义待实施
 
 ---

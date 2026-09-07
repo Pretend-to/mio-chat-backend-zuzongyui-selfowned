@@ -1,28 +1,41 @@
 # MioChat Channel SubAgent 开发设计
 
-> 版本：v0.1
+> 版本：v0.2
 > 状态：Channel-first 设计稿，尚未实现
-> 日期：2026-09-04
-> 范围：Channel 侧子 Agent、独立 Session、后台任务和结果投递
-> 后续范围：Web 管理界面、跨进程 Worker、跨机器调度
+> 日期：2026-09-05
+> 范围：Channel 侧持久化 SubAgent、独立上下文、后台任务、结果投递和并行编排
+> 暂不包含：Web 管理界面、跨进程 Worker、跨机器调度、脚本沙箱
 
 ## 1. 设计结论
 
-MioChat 的 SubAgent 应该被实现为一个独立的「任务运行时」，每个运行实例拥有
-自己的子 Session，而不是把子任务继续追加到主 Agent 当前 Session，也不是每次
-重新加载一份 `ai-plugin`。
+MioChat 的 SubAgent 不应该把“子 Agent 的长期上下文”和“某一次执行”混成一个
+Session。正确的抽象是：
+
+```text
+SubAgentThread（持久化的子任务身份和 MessageChain）
+└── SubAgentRun（某一次触发，对应子 Thread 的一轮 continuation）
+```
+
+一个长期任务默认复用同一个 `SubAgentThread`，每次触发只创建一个新的
+`SubAgentRun`。只有明确选择 `fresh` 时，才创建新的子 Thread。
 
 核心关系如下：
 
 ```text
 Channel
-└── 主 Session（active session）
-    ├── SubAgent Session：行情调研
-    ├── SubAgent Session：日报编辑
-    └── SubAgent Session：数据校验
+├── Main Session（active session）
+│   └── 用户可见的主 MessageChain
+├── SubAgentThread：行情调研
+│   ├── Run 2026-09-05
+│   ├── Run 2026-09-06
+│   └── Run 2026-09-07
+└── SubAgentThread：日报编辑
+    ├── Run 2026-09-05
+    ├── Run 2026-09-06
+    └── Run 2026-09-07
 ```
 
-子 Session 与主 Session 属于同一个 Agent 和 Channel，但有独立的：
+子 Thread 与主 Session 属于同一个 Agent 和 Channel，但有独立的：
 
 - MessageChain；
 - session FIFO 与运行锁；
@@ -31,15 +44,16 @@ Channel
 - 运行状态、超时和取消信号。
 
 父子关系只作为元数据保存。主 Session 默认只看到子任务的最终摘要或产物引用，
-不会看到子任务的完整搜索、工具调用和中间思考过程。
+不会看到子任务的完整搜索、工具调用和中间过程。
 
 这能满足以下目标：
 
-1. 每日行情调研和日报编辑不占用主 Agent 的上下文窗口；
+1. 每日行情调研和日报编辑保留自己的连续上下文，不占用主 Agent 的上下文窗口；
 2. 主 Session 的 MessageChain 保持稳定，继续最大化利用 input cache；
-3. 子 Agent 仍然复用 MioChat 现有的 SessionPersistence、LLM、工具和 Channel
-   发送链路；
-4. 后续 Web 只需要读取 SubAgentRun 和子 Session，不需要重新设计执行模型。
+3. 同一子 Thread 的后续调用可以继续上一轮上下文，保证下一轮 user 消息追加在尾部；
+4. 一次性任务仍可以通过 `fresh` 创建完全隔离的上下文；
+5. 不同子 Thread 可以并行运行，但同一子 Thread 始终串行续写；
+6. 子 Agent 仍然复用 MioChat 现有的 SessionPersistence、LLM、工具和 Channel 发送链路。
 
 ## 2. 代码审阅结论
 
@@ -142,21 +156,30 @@ Channel。SubAgent 不新建一个永久 Agent，不与现有 `agentId` 概念�
 用户可见的 active session。它承载正常对话、用户主动输入和需要保留在主上下文内的
 最终摘要。
 
-### 3.3 SubAgent Session
+### 3.3 SubAgentThread
 
-一个 SubAgentRun 的上下文存储。它属于同一 Agent，可绑定同一 Channel，但默认不成为
-active session，也不在普通用户的 session 列表中展示。
+一个持久化的子任务身份和上下文容器，决定“这是谁、长期做什么、应该记住哪些历史”。
+它与底层子 Session 一对一：Session 负责消息存储，Thread 负责复用规则、工具策略、
+上下文版本和生命周期。Thread 默认不成为 active session，也不在普通用户的 session
+列表中展示。
 
 ### 3.4 SubAgentRun
 
-一次可观察、可取消、可恢复的执行实例。一个 Run 通常对应一个 SubAgent Session，
-但 Session 是上下文容器，Run 是生命周期实体，二者不要混为一谈。
+一次具体触发，是 Thread 上的一轮 continuation。一个 Thread 可以有多个按顺序执行的
+Run；一个 Run 只能绑定一个 Thread。Run 负责状态、预算、取消、恢复、delivery 和
+结果记录，不能被当成新的长期上下文容器。
 
-### 3.5 Parent Run
+### 3.5 RunGroup
+
+一次 fan-out/fan-in 编排的逻辑分组。一个 RunGroup 可以包含多个不同 Thread 上的
+Run，最终由父 Agent 或专用 editor Thread 聚合结果。`Promise.allSettled` 只适用于
+不同 Thread 的并行 Run，不适用于同一个 Thread 的多个 continuation。
+
+### 3.6 Parent Run
 
 如果主 Agent 通过工具创建 SubAgent，当前 LLM 调用对应的父 Run 记录
 `parentRunId`。如果任务由 Cron/Sentinel 直接创建，则 `parentRunId` 可以为空，
-但仍然要保存 `parentSessionId` 和目标 Channel。
+但仍然要保存 `parentSessionId`、目标 Channel 和触发来源。
 
 ## 4. 总体架构
 
@@ -198,15 +221,37 @@ active session，也不在普通用户的 session 列表中展示。
 
 ## 5. Session 复用方案
 
-### 5.1 子 Session 创建规则
+### 5.1 Thread 解析和创建规则
 
-SubAgentManager 创建 Run 后立即创建子 Session：
+SubAgentManager 先解析 Thread，再创建 Run。持久化任务按
+`(agentId, channelId, taskType, reuseKey)` 查找已有 Thread；找不到才创建。
+
+```js
+const thread = await manager.resolveThread({
+  agentId,
+  channelId,
+  taskType: 'market_research',
+  reuseKey: 'daily-market-researcher',
+  reusePolicy: 'persistent',
+})
+
+const run = await manager.createRun({
+  threadId: thread.id,
+  prompt,
+  mode: 'spawn',
+})
+```
+
+一次性任务使用 `reusePolicy: 'fresh'`，但仍然创建并持久化一个独立 Thread；
+`fresh` 只表示不复用历史 Thread，不表示不保存上下文。
+
+只有在 Thread 创建成功后，才创建底层子 Session：
 
 ```js
 const childSession = await memory.createSession({
   kind: 'subagent',
   parentSessionId,
-  runId,
+  subagentThreadId: thread.id,
   title: '行情调研 · 2026-09-04',
   visible: false,
 })
@@ -219,9 +264,13 @@ const childSession = await memory.createSession({
 - `parentSessionId` 可以为空（Cron/Sentinel 直接创建的任务）；
 - 不修改 Agent 的 active session；
 - 不继承父 Session 的完整 `chat[]`；
-- 创建后第一条 user 消息就是任务指令或任务输入。
+- 创建后第一条 user 消息就是任务指令或任务输入；后续 Run 必须追加到该 Session
+  当前 MessageChain 的尾部。
 
-### 5.2 子 Session 的上下文继承
+同一个 Thread 的多个 Run 不能同时调用 LLM。Manager 必须在 Thread 粒度加单飞锁；
+排队的 Run 保持 `queued`，完成前一 Run 后才能成为下一轮 continuation。
+
+### 5.2 持久化 Thread 的上下文继承
 
 默认只继承以下内容：
 
@@ -230,6 +279,10 @@ const childSession = await memory.createSession({
 - Run 级工具白名单；
 - 任务说明、输出格式、时间范围和资源限制；
 - 必要的父任务摘要或结构化输入。
+
+持久化 Thread 的下一次 Run 默认继承该 Thread 自己已经落盘的 MessageChain；不重新
+创建一个只包含 system prompt 的临时 chat。新的 user prompt 作为本轮 continuation
+追加在上一轮 assistant/tool 消息之后。
 
 默认不继承：
 
@@ -242,17 +295,28 @@ const childSession = await memory.createSession({
 如果确实需要父上下文，调用方必须显式传入经过截断的 `contextDigest`，并记录它
 的来源和 hash，防止无意中复制整个 MessageChain。
 
-### 5.3 Session 可见性和保留
+### 5.3 长期上下文压缩
+
+持久化不等于无限制地把全部历史塞入每次请求。Thread 需要支持 context version、
+summary/crystal、原始历史归档和摘要 hash：
+
+1. 固定 system/tool 前缀保持稳定；
+2. 较早 Run 压缩为可验证摘要；
+3. 最近若干 Run 保留原始消息；
+4. 大结果通过 artifact 引用，不重复嵌入 prompt；
+5. 压缩写入审计事件，不静默覆盖原始消息。
+
+### 5.4 Session 可见性和保留
 
 第一版建议：
 
 - 普通 `listSessions()` 默认只返回 `kind=main`；
-- SubAgent Session 在内部可通过 `runId` 查询；
+- SubAgent Session 在内部可通过 `threadId`/`runId` 查询；
 - Run 完成后保留 Session 和审计一段时间，便于复盘；
 - 后续增加清理策略：按天数、总 token、产物引用和失败状态清理；
 - 不主动合并子 Session 到主 Session。
 
-### 5.4 Legacy 与 Database 模式
+### 5.5 Legacy 与 Database 模式
 
 Database 模式应把子 Session 元数据作为正式字段保存。Legacy 兼容实现可以在
 session JSON 顶层增加 metadata，但不得把 `kind`、`parentSessionId` 和 `runId` 写入
@@ -261,10 +325,13 @@ session JSON 顶层增加 metadata，但不得把 `kind`、`parentSessionId` 和
 SessionPersistence 需要扩展以下兼容 API：
 
 ```js
-createSession({ kind, parentSessionId, runId, title, visible })
+createSession({ kind, parentSessionId, subagentThreadId, title, visible })
 getSession(id, { includeSubagent })
 listSessions({ kind, parentSessionId, visible })
 updateSessionMeta(id, patch)
+createSubAgentThread(input)
+getSubAgentThread(id)
+findPersistentSubAgentThread({ agentId, channelId, taskType, reuseKey })
 ```
 
 已有 `getSession(id)`、`appendUserMessage()`、`beginAssistantMessage()`、
@@ -273,23 +340,25 @@ updateSessionMeta(id, patch)
 ## 6. SubAgentRun 数据模型
 
 建议新增独立的 `SubAgentRun` 表，不把完整运行状态塞进 `Session` 或 Agent metadata。
+Thread 与底层 Session 长期绑定，因此 Run 不再独占一个子 Session。
 
 ### 6.1 推荐字段
 
 ```text
 SubAgentRun
 ├── id                  String PK                 run_xxx
+├── threadId            String                   持久化 SubAgentThread
 ├── agentId             String                   归属 Agent
 ├── channelId           String                   精确目标 Channel
 ├── parentRunId         String?                  父 Run
 ├── parentSessionId     String?                  父 Session
-├── sessionId           String UNIQUE             子 Session
 ├── taskType            String                   research/report/analysis...
 ├── mode                String                   delegate/spawn
 ├── status              String                   状态机状态
 ├── prompt              String                   初始任务（可脱敏）
 ├── inputJson           String                   结构化输入
-├── toolNamesJson       String                   工具快照
+├── toolNamesJson       String                   本次 Run 工具快照
+├── toolDefinitionsHash  String                   工具定义版本
 ├── provider            String?
 ├── model               String?
 ├── reasoningEffort     Int?
@@ -309,7 +378,8 @@ SubAgentRun
 
 约束：
 
-- `sessionId` 唯一，一个 Run 不重复绑定多个子 Session；
+- `threadId` 必须存在，Thread 的底层 `sessionId` 长期复用；
+- 同一 Thread 同时最多一个 `running`/`waiting_tool` Run；
 - `(agentId, idempotencyKey)` 可选唯一，用于 Cron 重试去重；
 - `channelId` 和 `agentId` 必须一起校验；
 - 结果大小要有限制，大结果保存为 artifact/file 引用；
@@ -349,7 +419,8 @@ running ───────► waiting_tool ───────► running
   ├──────────────► completed
   ├──────────────► failed
   ├──────────────► cancelled
-  └──────────────► expired
+  ├──────────────► expired
+  └──────────────► interrupted
 ```
 
 状态语义：
@@ -363,8 +434,28 @@ running ───────► waiting_tool ───────► running
 | `failed` | 业务、模型或持久化失败 | 按错误类型决定 |
 | `cancelled` | 用户、父任务或系统取消 | 默认否 |
 | `expired` | 超过 deadline | 可人工重试 |
+| `interrupted` | 进程退出或执行租约丢失 | 按幂等策略恢复 |
 
-### 7.1 取消语义
+### 7.1 创建和执行顺序
+
+Run 必须先持久化再执行：
+
+1. 校验 Agent、Channel、父 Session 和 Thread 所有权；
+2. 按 `reusePolicy` 解析或创建 SubAgentThread；
+3. 冻结 tool/provider/model/budget 快照；
+4. 创建 `SubAgentRun(status=queued)`；
+5. 取得 Thread 单飞锁；
+6. 更新 Run 为 `running`，追加本轮 user message；
+7. 执行 LLM 和工具；
+8. 追加 assistant/tool 消息并保存 result；
+9. 执行 delivery；
+10. 更新 `completed` 或明确的失败状态；
+11. 释放 Thread 锁并唤醒下一个 Run。
+
+同一个 Thread 的下一轮 user message 必须在上一轮 assistant/tool 消息之后追加，
+不能创建新的临时 chat 绕过 Thread FIFO。
+
+### 7.2 取消语义
 
 - 父 Run 取消时，默认级联取消未完成子 Run；
 - `detach=true` 时子 Run 不受父 Run 取消影响；
@@ -399,13 +490,14 @@ await channel.runSessionTurn(sessionId, prompt, {
 
 要求：
 
-1. 校验 `sessionId` 属于当前 Agent；
-2. 校验 `channelId` 与当前 Channel 一致；
+1. `sessionId` 必须存在，不能回退到 active session；
+2. 校验 `sessionId` 属于当前 Agent 和目标 Channel；
 3. 显式调用 `_enqueueSession(sessionId, ...)`；
-4. 复用用户消息先落盘和 assistant draft 生命周期；
-5. 将 `isSubAgent` 传到 LLM 与输出层；
-6. 禁止默认发送中间文本、typing、工具确认卡片；
-7. 返回结构化的最终结果、assistant message id、token 和错误状态。
+4. 复用 user 落盘、assistant draft、Chunk 和 finalize 生命周期；
+5. 将 `isSubAgent` 和 Run 工具快照传到 LLM 与输出层；
+6. 禁止 Slash、普通 typing、在线用户消息广播和工具确认卡片；
+7. 不调用 `setActiveSession()`；
+8. 返回结构化的最终结果、assistant message id、token 和错误状态。
 
 ### 8.2 为什么仍然复用 Session FIFO
 
@@ -413,8 +505,8 @@ await channel.runSessionTurn(sessionId, prompt, {
 
 - 主 Session 可以继续处理用户消息；
 - 子 Session 可以独立执行和排队；
-- 同一个 SubAgent Session 的多次 continuation 仍然串行；
-- 多个子任务之间可以并行，但受 SubAgentManager 的全局/Agent/Channel 配额限制。
+- 同一个 SubAgentThread 的多次 continuation 仍然串行；
+- 不同 SubAgentThread 可以并行，但受 SubAgentManager 的全局/Agent/Channel 配额限制。
 
 注意：Session FIFO 不是跨进程锁。后续引入多 Worker 时，必须增加数据库 lease 或
 队列层去重，不能只依赖内存 Map。
@@ -473,6 +565,8 @@ await channel.runSessionTurn(sessionId, prompt, {
   "task": "调研今天 BTC、ETH 的价格、成交量和重大新闻，输出结构化研究笔记。",
   "taskType": "market_research",
   "mode": "delegate",
+  "reusePolicy": "persistent",
+  "reuseKey": "market-researcher",
   "delivery": "parent",
   "tools": ["search", "finance"],
   "timeoutSec": 600
@@ -490,6 +584,8 @@ await channel.runSessionTurn(sessionId, prompt, {
   "action": "spawn",
   "task": "每天收集市场数据并生成日报。",
   "taskType": "daily_market_report",
+  "reusePolicy": "persistent",
+  "reuseKey": "daily-market-report",
   "delivery": "channel",
   "scheduleSource": "cron",
   "tools": ["search", "finance", "file_editor"],
@@ -504,6 +600,7 @@ await channel.runSessionTurn(sessionId, prompt, {
 {
   "success": true,
   "runId": "run_xxx",
+  "threadId": "thread_xxx",
   "sessionId": "s_sub_xxx",
   "status": "queued"
 }
@@ -511,12 +608,29 @@ await channel.runSessionTurn(sessionId, prompt, {
 
 ### 9.3 `status`、`wait`、`cancel`
 
-- `status(runId)`：返回状态、heartbeat、耗时、PID 不适用时不伪造 PID；
+- `status(runId)`：返回 Run、Thread、heartbeat、排队位置和最近错误；不伪造 PID；
 - `wait(runId, timeoutSec)`：只等待状态变化或完成，不重复输出全部过程；
 - `cancel(runId, reason)`：执行真正的 abort 和状态变更；
 - 所有操作都必须校验当前 Agent/Channel 对 Run 的所有权。
 
-### 9.4 参数限制
+`spawn` 只创建或排队 Run，不等待子任务完成，因此不会阻塞主 Channel 响应队列。
+`delegate` 只阻塞当前主 Agent 的 LLM turn，其他 Session 和其他 Thread 仍可继续运行。
+
+### 9.4 并行调用
+
+多个不同 Thread 可以由编排层使用 `Promise.allSettled` 并行执行：
+
+```js
+const outcomes = await Promise.allSettled([
+  manager.run({ threadKey: 'btc-researcher', ...input }),
+  manager.run({ threadKey: 'eth-researcher', ...input }),
+  manager.run({ threadKey: 'news-researcher', ...input }),
+])
+```
+
+同一个 Thread 的多个 continuation 不得并行；必须进入该 Thread 的 FIFO。
+
+### 9.5 参数限制
 
 第一版建议：
 
@@ -577,13 +691,16 @@ user/system event:
 
 ### 10.4 子链稳定原则
 
-子 Session 的每次调用也必须保持稳定前缀：
+同一个 SubAgentThread 的每次 continuation 必须保持稳定前缀和尾部追加：
 
 - 固定 SubAgent system prompt；
 - 固定工具快照和工具顺序；
 - 固定任务元数据；
-- 只在尾部追加本次 user/tool/assistant 消息；
+- 只在上一轮 assistant/tool 消息之后追加本次 user/tool/assistant 消息；
 - 不把动态日志塞进 system prompt。
+
+Thread 的持久化 history 是后续 Run 的输入基础；Run 不是重新创建一份 session，也
+不是把上一次结果手动复制到新的 chat 数组。
 
 ## 11. 工具和插件模型
 
@@ -619,36 +736,51 @@ permission policy
 - 文件工具的工作目录和读写范围必须在 Run policy 中明确；
 - Sentinel 的 AdminOnly 受信任脚本规则不应自动扩展为 SubAgent 的 Shell 权限。
 
-## 12. 日报示例：行情调研 + 日报编辑
+## 12. 日报示例：持久化行情调研 + 持久化日报编辑
 
-推荐使用两个子任务，而不是让主 Agent 参与全过程：
+日报任务建立两个有稳定身份的 Thread，而不是每天重新创建两个无历史的 Session：
+
+```text
+Thread: daily-market-researcher
+  ├── Run: 2026-09-05 research
+  ├── Run: 2026-09-06 research
+  └── Run: 2026-09-07 research
+
+Thread: daily-report-editor
+  ├── Run: 2026-09-05 edit
+  ├── Run: 2026-09-06 edit
+  └── Run: 2026-09-07 edit
+```
+
+每天的流水线：
 
 ```text
 Cron 08:00
   │
-  └─ createRun(market_research, delivery=silent)
-       │
-       └─ child session A：抓取行情、新闻、指标
-            │ result: research artifact + structured facts
-            ▼
-       createRun(report_editor, parentRunId=A, delivery=channel)
-            │
-            └─ child session B：读取 research artifact，生成日报
-                 │
-                 └─ Channel 统一发送日报
+  ├─ resolve/reuse daily-market-researcher
+  │    └─ create Run A：抓取行情、新闻、指标
+  │         └─ 保存 research artifact + structured facts
+  │
+  └─ A 完成后 resolve/reuse daily-report-editor
+       └─ create Run B：读取 artifact，生成日报
+            └─ delivery=channel
 ```
 
 主 Session 不接收原始调研过程。只有当用户主动询问“今天的日报依据是什么”时，
 主 Agent 再通过 `runId` 或 artifact 引用读取必要资料。
 
-如果调研和编辑始终是固定流水线，也可以由一个 Orchestrator SubAgent 创建两个
-子 Run；但递归深度和总预算必须由父 Run 控制。
+研究员可以记住过去几天的数据口径和分析偏好；编辑员可以记住日报格式和栏目规则。
+但编辑员不需要复制研究员的完整 MessageChain，只消费结构化 artifact 和必要摘要。
+
+如果某次报告必须完全独立，例如用户要求“不要参考历史，重新做一份盲测”，则传入
+`reusePolicy=fresh` 创建临时 Thread。这个选择应由业务任务明确指定，不能把 fresh
+作为所有 Run 的默认行为。
 
 ## 13. Cron、Sentinel 和 SubAgent 的职责
 
 | 组件 | 负责什么 | 不负责什么 |
 | --- | --- | --- |
-| Cron | 到点创建 SubAgentRun | 不负责外部条件轮询，不直接拼主 Session |
+| Cron | 到点解析 reuseKey 并创建/唤醒 SubAgentRun | 不负责外部条件轮询，不直接拼主 Session |
 | Sentinel | 自己 loop，条件满足后发事件 | 不负责复杂日报编辑，不直接重写主 MessageChain |
 | SubAgentManager | Run 生命周期、上下文、预算、恢复和投递 | 不负责实现业务调研逻辑 |
 | Channel Session | 子任务上下文和消息持久化 | 不成为后台任务的全局调度器 |
@@ -669,24 +801,27 @@ idempotencyKey
 目标 Channel 找不到时，Run 进入 `target_unavailable` 或 `queued`（取决于调用方是否
 允许等待 Channel 恢复），禁止 fallback 到其他 Channel。
 
+Cron/Sentinel 触发的任务如果需要长期上下文，必须显式配置 `reuseKey`；没有
+`reuseKey` 的后台任务默认使用 `fresh`，避免不同业务意外共享同一子 Thread。
+
 ## 14. 故障、恢复和幂等
 
 ### 14.1 持久化顺序
 
 Run 必须先落库再执行：
 
-1. 校验 Agent、Channel、父 Session 归属；
-2. 创建 `SubAgentRun(status=queued)`；
-3. 创建子 Session；
-4. 写入初始任务输入；
-5. 更新 Run 为 `running`；
-6. 进入 Channel session FIFO；
-7. 完成子 assistant draft 和 Run result；
+1. 校验 Agent、Channel、父 Session 和 Thread 归属；
+2. 按 reuse policy 解析或创建 Thread；
+3. 冻结工具、模型、预算和权限快照；
+4. 创建 `SubAgentRun(status=queued)`；
+5. 进入 Thread/Channel session FIFO；
+6. 更新 Run 为 `running`，把本轮 user 输入追加到既有 MessageChain 尾部；
+7. 完成 assistant/tool 消息和 Run result；
 8. 执行 delivery；
-9. 最后更新 `completed` 或 `failed`。
+9. 最后更新 `completed` 或 `failed`，释放 Thread 锁。
 
 任何阶段失败都必须留下可查询状态。不能出现“用户收到已创建，但数据库没有
-Run”或“Run completed，但子 Session 没有最终消息”的半状态。
+Run”或“Run completed，但子 Thread 没有最终消息”的半状态。
 
 ### 14.2 应用重启
 
@@ -744,6 +879,7 @@ Channel 侧第一版提供：
 
 ```text
 runId
+threadId
 parentRunId
 agentId
 channelId
@@ -763,13 +899,15 @@ delivery status
 
 ## 17. 测试计划
 
-### 17.1 Session 隔离
+### 17.1 Session/Thread 隔离
 
 - 创建主 Session 和子 Session，确认 active session 不变；
+- 同一 reuseKey 的多次触发复用同一个 threadId、但拥有不同 runId；
+- `fresh` 连续触发得到不同 threadId；
 - 子消息只出现在子 Session；
 - 主 Session 的 `getChat()` 不包含子消息；
-- 子 Session 与主 Session 可以并行处理；
-- 同一子 Session 的两次调用仍严格串行；
+- 不同子 Thread 与主 Session 可以并行处理；
+- 同一子 Thread 的两次调用仍严格串行；
 - `listSessions()` 默认隐藏子 Session，内部过滤可以查到。
 
 ### 17.2 MessageChain 和缓存
@@ -778,7 +916,8 @@ delivery status
 - 子 Agent 的中间 tool call 不进入主 `ctx.chat`；
 - `spawn` 完成后使用新后台事件，不伪造旧 tool result；
 - 父 Session 下一轮历史保持原顺序；
-- 子 Session 连续轮次的 system/tool 前缀稳定。
+- 子 Thread 连续 Run 的 system/tool 前缀稳定；
+- 下一轮 user 消息追加在上一轮 assistant/tool 消息之后。
 
 ### 17.3 工具和权限
 
@@ -790,6 +929,7 @@ delivery status
 ### 17.4 调度和投递
 
 - Cron 创建 Run 而不是追加主 active session；
+- Cron/Sentinel 对同一 idempotency key 不重复创建 Thread 或 Run；
 - Sentinel 事件能精确路由到 Channel；
 - 找不到目标 Channel 不 fallback；
 - 同一 idempotency key 不重复创建；
@@ -806,17 +946,27 @@ delivery status
 
 ## 18. 分阶段实施
 
-### Phase 1：Session-first 同步 SubAgent
+### Phase 0：Thread/Run 契约和 persistence
+
+交付：
+
+1. 定义 `SubAgentThread`、`SubAgentRun`、`RunGroup` 类型和状态机；
+2. 扩展 Session persistence 的 `kind`、parent、visibility 和 `subagentThreadId`；
+3. 新增 Thread/Run store、reuseKey 查询和幂等索引；
+4. 增加 ownership、target Channel、active session 不变的测试。
+
+### Phase 1：持久化 Thread + 同步 delegate
 
 交付：
 
 1. `SubAgentRunService` / `SubAgentManager`；
-2. `SubAgentRun` 数据表和 Session 子类型；
-3. `BaseChannel.runSessionTurn()`；
-4. LLM 调用级 `toolNames/provider/model` 覆盖；
-5. `subagent(action="delegate")`；
-6. 独立子 Session、结果结构和基础取消；
-7. Session 隔离与 MessageChain 测试。
+2. `SubAgentThread`、`SubAgentRun` 数据表和 Session 子类型；
+3. `resolveThread(persistent|fresh)` 和 Thread 单飞锁；
+4. `BaseChannel.runSessionTurn()`；
+5. LLM 调用级 `toolNames/provider/model` 覆盖；
+6. `subagent(action="delegate")`；
+7. 子 Thread continuation、结果结构和基础取消；
+8. Thread 复用、MessageChain 顺序与 input cache 测试。
 
 Phase 1 不做：并行编排、Web、跨进程 Worker、自动 worktree、复杂 UI。
 
@@ -831,12 +981,16 @@ Phase 1 不做：并行编排、Web、跨进程 Worker、自动 worktree、复�
 5. heartbeat、重启恢复和 delivery 幂等；
 6. `/subagents` 管理指令。
 
-### Phase 3：编排和 Web
+### Phase 3：并行编排和长期上下文
 
 后续再考虑：
 
 - research → editor 多阶段 DAG；
 - 并行 fan-out/fan-in；
+- RunGroup 和 `Promise.allSettled` fan-out/fan-in；
+- contextVersion、summary/crystal 和历史归档；
+- 日报研究员/编辑员示例；
+- 资源配额、指标和审计查询；
 - Web 运行列表和日志；
 - 独立 Worker 进程；
 - worktree/container 隔离；
@@ -847,6 +1001,10 @@ Phase 1 不做：并行编排、Web、跨进程 Worker、自动 worktree、复�
 满足以下条件才算 Channel-first SubAgent 第一版完成：
 
 - 新建子任务不会改变主 active session；
+- 持久化任务多次触发复用同一个 SubAgentThread，每次触发生成独立 Run；
+- `fresh` 可以创建独立 Thread，但仍保留审计和恢复记录；
+- 同一 Thread 的 Run 严格串行，下一轮 user 消息追加在上一轮尾部；
+- 不同 Thread 可以受配额控制并行；
 - 主 Session MessageChain 不包含子任务中间消息；
 - 子任务可以独立使用 Session FIFO 和持久化生命周期；
 - 主 Agent 和子 Agent 的工具配置互不污染；
@@ -854,8 +1012,8 @@ Phase 1 不做：并行编排、Web、跨进程 Worker、自动 worktree、复�
 - 子任务可以被查询、等待、取消；
 - Channel 目标校验严格，不发生跨 Agent/Channel fallback；
 - 应用重启后任务状态可解释、可恢复或明确失败；
-- 日报类长任务可以直接从子 Session 生成并投递 Channel，不占用主 Agent 上下文；
-- 所有测试覆盖 Session 隔离、MessageChain 稳定、权限、投递幂等和恢复路径。
+- 日报类长任务可以复用子 Thread、保留跨天上下文并投递 Channel，不占用主 Agent 上下文；
+- 所有测试覆盖 Thread 复用、MessageChain 稳定、权限、投递幂等和恢复路径。
 
 ## 20. 明确暂缓的决定
 
@@ -870,5 +1028,6 @@ Phase 1 不做：并行编排、Web、跨进程 Worker、自动 worktree、复�
 - 旧工具名兼容迁移。
 
 第一版的核心不是“再造一个完整 Codex”，而是让 MioChat 的 Channel 能够安全地
-拥有多个彼此隔离、可持久化、可取消的后台工作 Session，并让主 Agent 只接收它
-真正需要的结果。
+拥有多个彼此隔离、可持久化、可取消的后台工作 Thread，并让主 Agent 只接收它
+真正需要的结果。Thread 是长期身份和上下文，Run 是一次执行；同一 Thread 串行
+续写，不同 Thread 并行协作。

@@ -181,7 +181,7 @@ sentinel({
 
 | 参数 | 类型 | 说明 | 推荐实践 |
 |---|---|---|---|
-| `action` | string | `"create"` / `"list"` / `"remove"` / `"enable"` / `"disable"` / `"run"` / `"logs"` | 操作指令 |
+| `action` | string | `"create"` / `"update"` / `"list"` / `"remove"` / `"enable"` / `"disable"` / `"run"` / `"logs"` | 操作指令 |
 | `id` | string | 哨兵唯一英文标识（如 `sol_breakout`） | 必须语义清晰 |
 | `scriptPath` | string | 已编写好的脚本路径（如 `channels-data/triggers/scripts/xxx.js`） | **必须先落盘文件再传路径** |
 | `params` | object | 传给脚本运行时的参数对象 | 脚本内通过 `process.env.TRIGGER_PARAMS` 读取 |
@@ -189,6 +189,22 @@ sentinel({
 | `promptTemplate` | string | 唤醒时的关注提示词模板 | 支持 `{{payload.reason}}` 或 `{{payload.data.key}}` 插值 |
 | `cooldownSec` | number | 冷却时间（秒） | 默认 1800 秒（30分钟），防频繁重复触发 |
 | `maxFiresPerDay` | number | 每日最大唤醒限额 | 默认 5 次，防死循环刷屏 |
+| `restart` | boolean | `update` 时强制重启进程 | 修改 params、sessionId、mode、scriptPath 时自动重启 |
+
+### 更新已注册哨兵
+
+脚本文件可以先直接修改，再调用 `update` 让运行中的哨兵重新加载。修改
+`params`、`sessionId`、`mode` 或 `scriptPath` 会自动重启；只修改提示词、冷却或
+每日限额不会重启。也可以显式传 `restart: true`。
+
+```json5
+sentinel({
+  action: "update",
+  id: "btc_price_alert",
+  params: { targetPrice: 81000, symbol: "BTCUSDT" },
+  promptTemplate: "【行情警报】{{payload.reason}}\\n请提示风险。"
+})
+```
 
 ---
 

@@ -113,4 +113,8 @@ test('ProfileTool - read, update, clear and client system message emission', asy
     assert.strictEqual(systemMessages[0].data.action, 'clear')
     assert.strictEqual(systemMessages[0].data.opening, '')
   })
+
+  await t.test('should be marked as groupOnly tool', () => {
+    assert.strictEqual(tool.groupOnly, true)
+  })
 })
