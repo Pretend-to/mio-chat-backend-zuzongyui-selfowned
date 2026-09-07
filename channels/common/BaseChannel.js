@@ -23,6 +23,11 @@ import {
   prepareChannelUserInput,
 } from '../llm.js'
 import sessions from '../../lib/server/socket.io/services/sessions.js'
+import {
+  formatChannelErrorMessage,
+  formatWebErrorMessage,
+  parseErrorDetails,
+} from './errorFormatter.js'
 
 export class BaseChannel {
   /**
@@ -481,12 +486,18 @@ export class BaseChannel {
       isWeb: Boolean(packet.ctx?.isWeb),
       sid,
     }
-    const isSlash = typeof packet.text === 'string' && packet.text.trim().startsWith('/')
+    const isSlash =
+      typeof packet.text === 'string' && packet.text.trim().startsWith('/')
     if (!isSlash) {
       this.startTyping(typingCtx, { sessionId: sid })
     }
 
-    if (!from || this.debounceEnabled === false || packet.immediate || isSlash) {
+    if (
+      !from ||
+      this.debounceEnabled === false ||
+      packet.immediate ||
+      isSlash
+    ) {
       const activeSid = sid || (await this.memory?.getActiveSession?.())
       const ctx = {
         contextToken: packet.contextToken || this.latestContextToken || null,
@@ -946,9 +957,11 @@ export class BaseChannel {
   async appendUserMessage(sessionId, text, options = {}) {
     const targetSid = sessionId || (await this.memory.getActiveSession())
     const targetFrom =
-      options.from && options.from !== 'system_trigger' && options.from !== 'system'
+      options.from &&
+      options.from !== 'system_trigger' &&
+      options.from !== 'system'
         ? options.from
-        : (this.masterId || options.from || 'system_trigger')
+        : this.masterId || options.from || 'system_trigger'
     const ctx = {
       channelId: this.id || this.channelId,
       contextToken: options.contextToken || this.latestContextToken || null,
@@ -1683,18 +1696,62 @@ export class BaseChannel {
       }
       return null
     } catch (error) {
+      const channelErrorText = formatChannelErrorMessage(error)
+      this.log?.error?.(
+        `[${this.channelType}] 交互处理失败: ${error.message || error}`,
+      )
+
+      // 1. 如果来自 IM 渠道（如微信），通过 _safeSend 给用户下发错误提示回显
+      if (!ctx.isWeb && ctx.from) {
+        await this._safeSend(
+          ctx.from,
+          ctx.contextToken || this.latestContextToken,
+          channelErrorText,
+        ).catch(() => {})
+      }
+
+      // 2. 如果在线的 Web 客户端正在同步镜像该渠道消息，通知 Web 客户端 failed
+      const webMessage = formatWebErrorMessage(error)
+      const details = parseErrorDetails(error)
+      if (!ctx.isWeb && ctx.messageId) {
+        const onlineWebClients = sessions.getAllAdminClients() || []
+        for (const client of onlineWebClients) {
+          client.sendOpenaiMessage?.(
+            'failed',
+            {
+              code: details.code,
+              message: webMessage,
+              metaData: {
+                contactorId: ctx.channelId || this.channelId || this.id,
+                messageId: ctx.messageId,
+              },
+              requestId: details.requestId,
+              status: details.status,
+            },
+            ctx.messageId,
+          )
+        }
+      }
+
+      // 3. 收口持久化，将错误记录落盘
       if (assistantPersistenceId) {
         await persistenceQueue
         const partialText = emittedBlocks.join('\n\n')
+        const finalContent = partialText
+          ? [
+              { data: { text: partialText }, type: 'text' },
+              { data: { text: webMessage }, type: 'text' },
+            ]
+          : [{ data: { text: webMessage }, type: 'text' }]
         await this.memory
           .finalizeAssistantMessage(
             assistantPersistenceId,
             {
-              content: partialText
-                ? [{ data: { text: partialText }, type: 'text' }]
-                : [],
+              content: finalContent,
               role: 'assistant',
-              text: partialText,
+              text: partialText
+                ? `${partialText}\n\n${webMessage}`
+                : webMessage,
               time: Date.now(),
             },
             'failed',

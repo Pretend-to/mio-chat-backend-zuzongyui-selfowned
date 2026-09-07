@@ -15,36 +15,83 @@ const MASTER = 'master@im.wechat'
 
 function makeHarness() {
   const llmCalls = []
-  const llm = { process: async (ctx) => { llmCalls.push(ctx); return { text: `RE: ${ctx.text}` } } }
+  const llm = {
+    process: async (ctx) => {
+      llmCalls.push(ctx)
+      return { text: `RE: ${ctx.text}` }
+    },
+  }
   const mockClient = {
     botId: 'bot-001',
     sendLog: [],
     typingLog: [],
     configCalls: 0,
-    getConfig: async () => { mockClient.configCalls++; return { typing_ticket: 'tt-1' } },
-    sendTyping: async (p) => { mockClient.typingLog.push(p.status) },
-    sendMessage: async (p) => { mockClient.sendLog.push(p) },
+    getConfig: async () => {
+      mockClient.configCalls++
+      return { typing_ticket: 'tt-1' }
+    },
+    sendTyping: async (p) => {
+      mockClient.typingLog.push(p.status)
+    },
+    sendMessage: async (p) => {
+      mockClient.sendLog.push(p)
+    },
     getUpdates: async () => ({ ret: 0, msgs: [], get_updates_buf: '' }),
-    notifyStart: async () => {}, notifyStop: async () => {},
+    notifyStart: async () => {},
+    notifyStop: async () => {},
   }
-  const baseDir = path.join(os.tmpdir(), `mio-wc-${Date.now()}_${Math.random().toString(36).slice(2, 8)}`)
+  const baseDir = path.join(
+    os.tmpdir(),
+    `mio-wc-${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+  )
   const memory = new MemoryStore({ agentId: 'wechat-master', baseDir })
-  const channel = new WechatChannel({ client: mockClient, memory, masterId: MASTER, llm, typing: true })
-  const lastSent = () => mockClient.sendLog[mockClient.sendLog.length - 1]?.item_list?.[0]?.text || ''
-  const userMsg = (text, { token = 'CTX', from = MASTER } = {}) => ({
-    from_user_id: from, message_id: Math.floor(Math.random() * 1e6), message_type: 1,
-    context_token: token, item_list: [{ type: 1, text }],
+  const channel = new WechatChannel({
+    client: mockClient,
+    memory,
+    masterId: MASTER,
+    llm,
+    typing: true,
   })
-  return { llm, llmCalls, mockClient, memory, channel, lastSent, userMsg, baseDir }
+  const lastSent = () =>
+    mockClient.sendLog[mockClient.sendLog.length - 1]?.item_list?.[0]?.text ||
+    ''
+  const userMsg = (text, { token = 'CTX', from = MASTER } = {}) => ({
+    from_user_id: from,
+    message_id: Math.floor(Math.random() * 1e6),
+    message_type: 1,
+    context_token: token,
+    item_list: [{ type: 1, text }],
+  })
+  return {
+    llm,
+    llmCalls,
+    mockClient,
+    memory,
+    channel,
+    lastSent,
+    userMsg,
+    baseDir,
+  }
 }
 
 test('WechatChannel 渠道核心', async () => {
-  const { llm, llmCalls, mockClient, memory, channel, lastSent, userMsg, baseDir } = makeHarness()
+  const {
+    llm,
+    llmCalls,
+    mockClient,
+    memory,
+    channel,
+    lastSent,
+    userMsg,
+    baseDir,
+  } = makeHarness()
   // 预置默认灵魂（灵魂引导有独立 M3 test 块覆盖）；此处测正常对话路径
   await memory.writeSoul('你叫小助手')
 
   await test('单用户边界：非绑定者消息被忽略', async () => {
-    await channel._handleMessage(userMsg('你是谁', { from: 'stranger@im.wechat' }))
+    await channel._handleMessage(
+      userMsg('你是谁', { from: 'stranger@im.wechat' }),
+    )
     assert.strictEqual(llmCalls.length, 0)
     assert.strictEqual(mockClient.sendLog.length, 0)
   })
@@ -122,9 +169,11 @@ test('WechatChannel 渠道核心', async () => {
     llm.getModels = () => ({
       defaultProvider: 'AIStdio',
       models: {
-        AIStdio: [{ owner: 'Google', models: ['gemini-2.5-flash', 'gemini-2.5-pro'] }],
-        MioChat: [{ owner: 'OpenAI', models: ['gpt-4o'] }]
-      }
+        AIStdio: [
+          { owner: 'Google', models: ['gemini-2.5-flash', 'gemini-2.5-pro'] },
+        ],
+        MioChat: [{ owner: 'OpenAI', models: ['gpt-4o'] }],
+      },
     })
     await channel._handleMessage(userMsg('/model ls'))
     assert.ok(lastSent().includes('gemini-2.5-flash'))
@@ -144,27 +193,55 @@ test('WechatChannel 渠道核心', async () => {
     const llm3 = {
       process: async (ctx) => {
         if (ctx.guidance) {
-          if (ctx.text.includes('陪伴')) return { text: '记住了！', soulDraft: '你是用户的陪伴型助理，名字叫 小助手，陪伴用户工作' }
-          return { text: '你好呀，我还没有人格设定，你希望我怎样陪伴我？给我取个名字吧？' }
+          if (ctx.text.includes('陪伴'))
+            return {
+              text: '记住了！',
+              soulDraft: '你是用户的陪伴型助理，名字叫 小助手，陪伴用户工作',
+            }
+          return {
+            text: '你好呀，我还没有人格设定，你希望我怎样陪伴我？给我取个名字吧？',
+          }
         }
         return { text: `RE:${ctx.text}` }
       },
     }
     const client3 = {
-      botId: 'b', sendLog: [], getConfig: async () => ({ typing_ticket: 't' }),
-      sendTyping: async () => {}, sendMessage: async (p) => { client3.sendLog.push(p) },
-      getUpdates: async () => ({ ret: 0, msgs: [], get_updates_buf: '' }), notifyStart: async () => {}, notifyStop: async () => {},
+      botId: 'b',
+      sendLog: [],
+      getConfig: async () => ({ typing_ticket: 't' }),
+      sendTyping: async () => {},
+      sendMessage: async (p) => {
+        client3.sendLog.push(p)
+      },
+      getUpdates: async () => ({ ret: 0, msgs: [], get_updates_buf: '' }),
+      notifyStart: async () => {},
+      notifyStop: async () => {},
     }
-    const ch3 = new WechatChannel({ client: client3, memory: memory3, masterId: MASTER, llm: llm3, typing: false })
-    const last3 = () => client3.sendLog[client3.sendLog.length - 1]?.item_list?.[0]?.text || ''
-    const msg = (text) => ({ from_user_id: MASTER, context_token: 'c', message_type: 1, item_list: [{ type: 1, text }] })
+    const ch3 = new WechatChannel({
+      client: client3,
+      memory: memory3,
+      masterId: MASTER,
+      llm: llm3,
+      typing: false,
+    })
+    const last3 = () =>
+      client3.sendLog[client3.sendLog.length - 1]?.item_list?.[0]?.text || ''
+    const msg = (text) => ({
+      from_user_id: MASTER,
+      context_token: 'c',
+      message_type: 1,
+      item_list: [{ type: 1, text }],
+    })
 
     await ch3._handleMessage(msg('你好'))
     assert.ok(last3().includes('还没有人格设定'), '首聊进入引导模式')
     assert.strictEqual(await memory3.readSoul(), '', '引导未定前不写 soul')
 
     await ch3._handleMessage(msg('我希望你陪伴我工作'))
-    assert.ok((await memory3.readSoul()).includes('小助手'), 'AI 提炼并固化 soul.md')
+    assert.ok(
+      (await memory3.readSoul()).includes('小助手'),
+      'AI 提炼并固化 soul.md',
+    )
     assert.ok(last3().includes('记住了'), '回复确认灵魂已设定')
 
     await ch3._handleMessage(msg('今天做什么'))
@@ -173,9 +250,13 @@ test('WechatChannel 渠道核心', async () => {
     // 引导已不再单独占据流程层：引导对话同样正常落盘 session chat，
     // 为后续对话保留完整上下文（3 轮 user/assistant 交替 = 6 条）
     const chat3 = await memory3.getChat(sid3)
-    assert.strictEqual(chat3.length, 6, '三轮对话（含引导）全部落盘 session chat')
+    assert.strictEqual(
+      chat3.length,
+      6,
+      '三轮对话（含引导）全部落盘 session chat',
+    )
     assert.deepStrictEqual(
-      chat3.map(c => `${c.role}:${c.text}`),
+      chat3.map((c) => `${c.role}:${c.text}`),
       [
         'user:你好',
         'assistant:你好呀，我还没有人格设定，你希望我怎样陪伴我？给我取个名字吧？',
@@ -189,5 +270,35 @@ test('WechatChannel 渠道核心', async () => {
     fs.rmSync(baseDir3, { recursive: true, force: true })
   })
 
-fs.rmSync(baseDir, { recursive: true, force: true })
+  await test('异常回显：LLM 抛错时向微信用户下发格式化的失败提示', async () => {
+    mockClient.sendLog.length = 0
+    const errChannel = new WechatChannel({
+      client: mockClient,
+      debounceEnabled: false,
+      llm: {
+        process: async () => {
+          throw new Error(
+            '500 400 credit insufficient balance: balance=0 required=2072 (request id: 20260907132209787259049c955d568fNCxOw6a)',
+          )
+        },
+      },
+      logger: { debug() {}, error() {}, info() {}, warn() {} },
+      masterId: 'master@im.wechat',
+      memory,
+      typing: false,
+    })
+    await assert.rejects(
+      () => errChannel._handleMessage(userMsg('测试出错')),
+      /credit insufficient balance/,
+    )
+    assert.ok(mockClient.sendLog.length >= 1)
+    const sent =
+      mockClient.sendLog[mockClient.sendLog.length - 1]?.item_list?.[0]?.text ||
+      ''
+    assert.ok(sent.includes('⚠️ 请求处理失败'))
+    assert.ok(sent.includes('credit insufficient balance'))
+    assert.ok(sent.includes('20260907132209787259049c955d568fNCxOw6a'))
+  })
+
+  fs.rmSync(baseDir, { recursive: true, force: true })
 })
