@@ -481,9 +481,12 @@ export class BaseChannel {
       isWeb: Boolean(packet.ctx?.isWeb),
       sid,
     }
-    this.startTyping(typingCtx, { sessionId: sid })
+    const isSlash = typeof packet.text === 'string' && packet.text.trim().startsWith('/')
+    if (!isSlash) {
+      this.startTyping(typingCtx, { sessionId: sid })
+    }
 
-    if (!from || this.debounceEnabled === false || packet.immediate) {
+    if (!from || this.debounceEnabled === false || packet.immediate || isSlash) {
       const activeSid = sid || (await this.memory?.getActiveSession?.())
       const ctx = {
         contextToken: packet.contextToken || this.latestContextToken || null,
@@ -942,16 +945,30 @@ export class BaseChannel {
    */
   async appendUserMessage(sessionId, text, options = {}) {
     const targetSid = sessionId || (await this.memory.getActiveSession())
+    const targetFrom =
+      options.from && options.from !== 'system_trigger' && options.from !== 'system'
+        ? options.from
+        : (this.masterId || options.from || 'system_trigger')
     const ctx = {
       channelId: this.id || this.channelId,
-      from: options.from || 'system_trigger',
+      contextToken: options.contextToken || this.latestContextToken || null,
+      from: targetFrom,
       isTask: Boolean(options.isTask || options.isWake),
       isWake: Boolean(options.isWake),
       sid: targetSid,
       triggerId: options.triggerId || null,
       ...options,
     }
+    if (!ctx.from || ctx.from === 'system_trigger') {
+      ctx.from = targetFrom
+    }
+    if (!ctx.contextToken && this.latestContextToken) {
+      ctx.contextToken = this.latestContextToken
+    }
     ctx.messageTime = ensureMessageTime(ctx.messageTime)
+    this.log?.info?.(
+      `[${this.channelType}] 📥 接收外部/唤醒消息并加入会话队列 | 会话: ${targetSid} | 来源: ${options.source || options.from || 'trigger'} | 目标接收者: ${ctx.from}`,
+    )
     return this._enqueueSession(targetSid, text.trim(), ctx)
   }
 

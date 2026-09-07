@@ -245,9 +245,11 @@ export class WechatChannel extends BaseChannel {
       })
     }
 
+    const isSlash = typeof text === 'string' && text.trim().startsWith('/')
     return this.enqueueInboundDebounce(from, {
       contextToken,
       hasMedia,
+      immediate: isSlash,
       pendingMediaPromise,
       rawMsg: msg,
       text,
@@ -262,11 +264,16 @@ export class WechatChannel extends BaseChannel {
   }
 
   buildSendMsg({ to, text, contextToken, fromBot }) {
+    const targetTo =
+      to && to !== 'system_trigger' && to !== 'system'
+        ? to
+        : this.masterId
+    const targetToken = contextToken || this.latestContextToken || null
     return buildSendMsg({
-      contextToken,
-      fromBot: fromBot || this.client.botId,
+      contextToken: targetToken,
+      fromBot: fromBot || this.client?.botId,
       text,
-      to,
+      to: targetTo,
     })
   }
 
