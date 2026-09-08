@@ -64,6 +64,21 @@ test('Channel 管理 API 统一通过 OneBots，并兼容旧 wechat 记录', asy
   t.after(() => runtime.dispose())
   controller.initChannelController({ channelStore: store, runtime, onebotsGateway: gateway })
 
+  const createResponse = response()
+  await controller.createChannel(request({}, {
+    name: 'QQ 测试',
+    type: 'onebots',
+    platform: 'qq',
+    protocol: 'onebot.v12',
+    config: { receive_mode: 'manual' },
+  }), createResponse)
+  const generic = await store.get(createResponse.body.data.id)
+  assert.equal(generic.type, 'onebots')
+  assert.equal(generic.platform, 'qq')
+  assert.equal(generic.protocol, 'onebot.v12')
+  assert.deepEqual(generic.config, { receive_mode: 'manual' })
+  await store.remove(generic.id)
+
   const created = await store.create({ name: '绑定测试', type: 'wechat' })
   const qrResponse = response()
   await controller.getChannelQrcode(request({ id: created.id }), qrResponse)

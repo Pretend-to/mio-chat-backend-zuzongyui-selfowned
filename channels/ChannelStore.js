@@ -17,7 +17,10 @@ import {
  *   {
  *     id,            // 唯一 id（如 c_xxx）
  *     name,          // bot 显示名
- *     type,          // 'wechat'
+ *     type,          // runtime，当前为 'onebots'；旧 'wechat' 自动兼容
+ *     platform,      // OneBots adapter，如 'wechat-clawbot'
+ *     protocol,      // 协议标识，如 'onebot.v12'
+ *     config,        // adapter 扩展配置
  *     agentId,       // 归属 agent（决定 memory/agents/<id> 与预设）默认 'wechat-master'
  *     token,         // bot_token（敏感，落盘）
  *     botId, userId, // iLink 登录返回的 bot 账户 id / 绑定者微信 id
@@ -91,7 +94,14 @@ export class ChannelStore {
   }
 
   _fromDatabase(row) {
+    let legacy = {}
+    try {
+      legacy = row.legacyJson ? JSON.parse(row.legacyJson) : {}
+    } catch (error) {
+      this.logger?.warn?.(`[ChannelStore] invalid legacy_json for ${row.id}: ${error.message}`)
+    }
     return {
+      ...legacy,
       agentId: row.agentId,
       avatar: row.avatar || '',
       botId: row.botId || '',
@@ -138,7 +148,7 @@ export class ChannelStore {
       provider: channel.provider || null,
       status: channel.status || 'unbound',
       tokenEnc,
-      type: channel.type || 'wechat',
+      type: channel.type || 'onebots',
       updatedAt: new Date(channel.updatedAt),
       userId: channel.userId || null,
     }
@@ -197,10 +207,12 @@ export class ChannelStore {
       botId: '',
       createdAt: now,
       id: `c_${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`,
-      name: data.name || '微信助手',
+      name: data.name || '渠道助手',
       status: 'unbound',
       token: '',
-      type: 'wechat',
+      type: 'onebots',
+      platform: 'wechat-clawbot',
+      protocol: 'onebot.v12',
       provider: data.provider || '',
       model: data.model || '',
       updatedAt: now,

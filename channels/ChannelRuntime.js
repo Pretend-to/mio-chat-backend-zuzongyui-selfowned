@@ -1,6 +1,6 @@
 import { createSessionPersistence } from '../lib/chat/persistence/createSessionPersistence.js'
 import { createBackendLlm } from './llm.js'
-import { isOneBotsChannel, ONEBOTS_PLATFORM } from './onebots/config.js'
+import { isOneBotsChannel, resolveOneBotsPlatform } from './onebots/config.js'
 
 /**
  * ChannelRuntime — 渠道运行时管理器（M6 后端）
@@ -179,7 +179,7 @@ export class ChannelRuntime {
         ...commonOptions,
         channel,
         gateway,
-        platform: channel.platform || ONEBOTS_PLATFORM,
+        platform: resolveOneBotsPlatform(channel),
       })
       await chn.start()
       this.running.set(channelId, { channel, chn, memory, gateway, onebots })

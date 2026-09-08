@@ -10,7 +10,7 @@ import {
   OneBotsGateway,
   normalizeIlinkInboundPacket,
 } from '../../channels/onebots/OneBotsGateway.js'
-import { isOneBotsChannel } from '../../channels/onebots/config.js'
+import { isOneBotsChannel, resolveOneBotsPlatform } from '../../channels/onebots/config.js'
 
 class FakeProtocol extends EventEmitter {
   async apply(action, params) {
@@ -78,6 +78,29 @@ test('OneBots treats legacy wechat records as a permanent compatibility alias', 
   assert.equal(isOneBotsChannel({ type: 'wechat' }, {}), true)
   assert.equal(isOneBotsChannel({ type: 'onebots' }, {}), true)
   assert.equal(isOneBotsChannel({ type: 'wechat' }, { MIO_WECHAT_DRIVER: 'onebots' }), true)
+  assert.equal(resolveOneBotsPlatform({ type: 'wechat' }), 'wechat-clawbot')
+  assert.equal(resolveOneBotsPlatform({ type: 'onebots', platform: 'qq' }), 'qq')
+  assert.equal(resolveOneBotsPlatform({ type: 'onebots:telegram' }), 'telegram')
+})
+
+test('OneBotsGateway lazily loads an arbitrary registered platform adapter', async () => {
+  const app = makeApp()
+  let loaded = 0
+  const gateway = new OneBotsGateway({
+    app,
+    skipRegistration: true,
+    adapterLoaders: {
+      qq: async () => {
+        loaded++
+        app.adapters.set('qq', app.adapters.get('wechat-clawbot'))
+      },
+    },
+  })
+
+  await gateway.startAccount({ id: 'qq-account', type: 'onebots', platform: 'qq' })
+  assert.equal(loaded, 1)
+  assert.equal(gateway.getAccountState('qq-account').platform, 'qq')
+  await gateway.dispose()
 })
 
 test('blank iLink group_id is normalized as a private event', () => {

@@ -96,12 +96,25 @@ channels/
 
 ## 3. 详细接口设计与生命周期约定
 
-### 3.0 渐进式启用
+### 3.0 渠道数据模型与历史兼容
 
-为了不在升级后立即切换已有微信账号，旧 `type: wechat` 记录默认仍使用自研 iLink 驱动。可通过以下任一方式显式启用 OneBots：
+新渠道使用正交字段描述运行时、平台适配器和协议，避免把 OneBots 与微信实现绑定：
 
-- 新建 `type: onebots` 的渠道（当前默认映射到 `wechat-clawbot`）；
-- 历史 `type=wechat` 记录会自动映射到 OneBots；`MIO_WECHAT_DRIVER` 仅作为已废弃的兼容环境变量保留，无需再配置。
+```json
+{
+  "type": "onebots",
+  "platform": "wechat-clawbot",
+  "protocol": "onebot.v12",
+  "config": {}
+}
+```
+
+- `type` 固定表示 MioChat 渠道运行时；
+- `platform` 对应 OneBots adapter 名称，并按需加载 `@onebots/adapter-<platform>`；
+- `protocol` 表示 MioChat 边界协议，当前支持 `onebot.v12`；
+- `config` 无损保存 adapter 专属配置。
+
+历史 `type=wechat` 记录读取时映射为 `onebots + wechat-clawbot`，无需数据迁移或重新扫码。`MIO_WECHAT_DRIVER` 已废弃且不再控制路由。
 
 ### 3.1 OneBotsGateway 规范签名
 ```ts
@@ -112,7 +125,10 @@ export class OneBotsGateway {
   /** 动态注册并启动一个账号 */
   async startAccount(channelConfig: {
     id: string;
+    type: 'onebots';
     platform: string; // 'wechat-clawbot' | 'feishu' | 'telegram' 等
+    protocol: 'onebot.v12';
+    config?: Record<string, any>;
     credentials?: Record<string, any>;
   }): Promise<void>;
 

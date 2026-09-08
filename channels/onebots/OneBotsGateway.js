@@ -110,10 +110,9 @@ export class OneBotsGateway {
         }
       }
 
-      // Importing these packages registers their factories in the real
-      // OneBots registries. Imports are lazy so tests can inject a tiny app.
+      // The protocol is fixed at the MioChat boundary. Concrete platform
+      // adapters are loaded lazily by ensurePlatformAdapter().
       if (!this.options.skipRegistration) {
-        await import('@onebots/adapter-wechat-clawbot')
         await import('@onebots/protocol-onebot-v12')
       }
       this.initialized = true
@@ -135,7 +134,14 @@ export class OneBotsGateway {
     const credentials = channelConfig.credentials && typeof channelConfig.credentials === 'object'
       ? channelConfig.credentials
       : {}
-    const protocol = channelConfig[ONEBOTS_PROTOCOL] ?? channelConfig.protocol ?? {}
+    const protocolName = typeof channelConfig.protocol === 'string'
+      ? channelConfig.protocol.trim().toLowerCase()
+      : ONEBOTS_PROTOCOL
+    if (protocolName !== ONEBOTS_PROTOCOL) {
+      throw new TypeError(`Unsupported embedded OneBots protocol: ${protocolName}`)
+    }
+    const protocol = channelConfig[protocolName] ?? channelConfig.protocolConfig ??
+      (channelConfig.protocol && typeof channelConfig.protocol === 'object' ? channelConfig.protocol : {})
     return {
       ...credentials,
       ...channelConfig.config,
@@ -146,7 +152,21 @@ export class OneBotsGateway {
           ?? credentials.outbound_text_format
           ?? 'markdown',
       }),
-      [ONEBOTS_PROTOCOL]: createProtocolConfig(protocol),
+      [protocolName]: createProtocolConfig(protocol),
+    }
+  }
+
+  async ensurePlatformAdapter(platform) {
+    if (this.app.adapters?.get?.(platform)) return
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(platform)) {
+      throw new TypeError(`Invalid OneBots platform: ${platform}`)
+    }
+    const loader = this.options.adapterLoaders?.[platform]
+    try {
+      if (loader) await loader()
+      else await import(`@onebots/adapter-${platform}`)
+    } catch (error) {
+      throw new Error(`OneBots adapter is not installed: @onebots/adapter-${platform}`, { cause: error })
     }
   }
 
@@ -289,6 +309,7 @@ export class OneBotsGateway {
       }
     }
 
+    await this.ensurePlatformAdapter(normalized.platform)
     const adapter = this.app.adapters?.get?.(normalized.platform)
       ?? this.app.findOrCreateAdapter?.(normalized.platform)
     if (!adapter) throw new Error(`OneBots adapter unavailable: ${normalized.platform}`)

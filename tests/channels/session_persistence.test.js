@@ -293,14 +293,25 @@ test('ChannelStore mirrors configuration without retaining plaintext tokens in d
   const encryptionKey = '44'.repeat(32)
   const shadow = new ChannelStore({ encryptionKey, file, mode: 'shadow', prisma })
 
-  const created = await shadow.create({ agentId: 'agent-channel-store', name: 'Mirror', token: 'secret' })
+  const created = await shadow.create({
+    agentId: 'agent-channel-store',
+    config: { receive_mode: 'manual' },
+    name: 'Mirror',
+    platform: 'qq',
+    protocol: 'onebot.v12',
+    token: 'secret',
+  })
   await shadow.update(created.id, { status: 'running' })
   const row = await prisma.channel.findUnique({ where: { id: created.id } })
   assert.equal(JSON.parse(row.legacyJson).token, undefined)
   assert.equal(row.status, 'running')
 
   const database = new ChannelStore({ encryptionKey, file, mode: 'database', prisma })
-  assert.equal((await database.get(created.id)).token, 'secret')
+  const restored = await database.get(created.id)
+  assert.equal(restored.token, 'secret')
+  assert.equal(restored.platform, 'qq')
+  assert.equal(restored.protocol, 'onebot.v12')
+  assert.deepEqual(restored.config, { receive_mode: 'manual' })
 
   const databaseShadow = new ChannelStore({ encryptionKey, file, mode: 'database-shadow', prisma })
   await databaseShadow.update(created.id, { model: 'new-model' })

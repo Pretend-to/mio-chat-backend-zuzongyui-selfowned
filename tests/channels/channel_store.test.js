@@ -9,9 +9,12 @@ test('ChannelStore 渠道配置持久化', async () => {
   const file = path.join(os.tmpdir(), `channels-${Date.now()}.json`)
   const store = new ChannelStore({ file })
 
-  await test('默认字段：agentId=wechat-master、status=unbound、token 不明文返回', async () => {
+  await test('默认字段：OneBots runtime + 微信兼容平台，token 不明文返回', async () => {
     const c = await store.create({ name: '我的微信' })
     assert.strictEqual(c.agentId, 'wechat-master')
+    assert.strictEqual(c.type, 'onebots')
+    assert.strictEqual(c.platform, 'wechat-clawbot')
+    assert.strictEqual(c.protocol, 'onebot.v12')
     assert.strictEqual(c.status, 'unbound')
     assert.ok(c.hasToken === false, '无 token 时 hasToken=false')
     assert.ok(!('token' in c), '对外不返回 token 明文')

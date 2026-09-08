@@ -34,8 +34,19 @@ export function isOneBotsChannel(channel, _env = process.env) {
     type === 'onebot' ||
     type.startsWith('onebots:') ||
     type.startsWith('onebots-') ||
+    driver === 'onebot' ||
     platform === 'onebots' ||
     platform === ONEBOTS_PLATFORM
+}
+
+/** Resolve the concrete OneBots adapter while retaining old WeChat records. */
+export function resolveOneBotsPlatform(channel = {}) {
+  const explicit = String(channel.platform || '').trim().toLowerCase()
+  if (explicit && explicit !== 'onebots') return explicit
+  const type = String(channel.type || '').trim().toLowerCase()
+  const compact = type.match(/^onebots?[:/-](.+)$/)
+  if (compact?.[1]) return compact[1]
+  return ONEBOTS_PLATFORM
 }
 
 /** Protocol settings for an in-process account. */
@@ -61,6 +72,7 @@ export default {
   ONEBOTS_PLATFORM,
   ONEBOTS_RECEIVE_MODE,
   isOneBotsChannel,
+  resolveOneBotsPlatform,
   createProtocolConfig,
   createLoopbackUrl,
 }
