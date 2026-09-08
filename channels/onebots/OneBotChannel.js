@@ -6,7 +6,7 @@
  * BaseChannel 的会话、防抖、流式发送和降级语义，只处理协议差异。
  */
 
-import { BaseChannel } from '../common/BaseChannel.js'
+import { BaseChannel, splitMessageText } from '../common/BaseChannel.js'
 import { bufferToImageUrl } from '../../utils/imgTools.js'
 import storageService from '../../lib/storage/StorageService.js'
 
@@ -279,6 +279,34 @@ export class OneBotChannel extends BaseChannel {
     this._minOutboundIntervalMs = opts?.minOutboundIntervalMs ?? 400
     this._sendMaxRetries = opts?.sendMaxRetries ?? 3
     this._sendRetryDelayMs = opts?.sendRetryDelayMs ?? 1000
+  }
+
+  /**
+   * 渠道专属回复风格与格式系统提示词
+   */
+  getChannelPrompt() {
+    const type = this.channel?.type || this.platform || this.channelType || 'IM'
+
+    return [
+      `【${type}渠道交互与消息风格规范】`,
+      `1. 你正在通过【${type}】直接与用户私聊，请遵循真实人类聊天习惯：`,
+      '   - 避免机械死板的单篇长文排版；',
+      '   - 善用自然的分条（发送多个气泡），模拟真实打字发消息的节奏；',
+      '   - 只要你认为需要分成多条消息发送，请显式使用 <msg>内容</msg> 标签包裹每一条独立消息（或在多条内容间使用 <break/> 换行分隔）；',
+      `   - 系统会自动将每个 <msg>...</msg> 拆分为${type}中的独立气泡逐条发送。`,
+      '2. 工具调用与阶段反馈：',
+      '   - 当你要调用耗时工具（如生图、搜索、深度研究）时，先输出一条分条消息告知用户，例如：',
+      '     <msg>好嘞，正在帮你画一张可爱的自画像，可能需要十几秒～</msg>',
+      '     (随后执行 draw 工具)',
+      '     <msg>画好啦！你看看喜欢不～</msg>',
+    ].join('\n')
+  }
+
+  /**
+   * 将一段完整文本块切分为渠道最终落地的独立消息段。
+   */
+  splitTextToSegments(text, _ctx = {}) {
+    return splitMessageText(text)
   }
 
   _isWechatClawbot() {
@@ -692,7 +720,9 @@ export class OneBotChannel extends BaseChannel {
       } else if (typeof this.client?.sendMessage === 'function') {
         res = await this.client.sendMessage(target)
       } else {
-        this.log?.warn?.(`[${this.channelType}:${this.id}] 客户端不支持 OneBot 消息发送`)
+        this.log?.warn?.(
+          `[${this.channelType}:${this.id}] 客户端不支持 OneBot 消息发送`,
+        )
         return null
       }
       const duration = Date.now() - sendStart
@@ -793,4 +823,5 @@ export class OneBotChannel extends BaseChannel {
   }
 }
 
+export { splitMessageText, splitMessageText as splitWechatText }
 export default OneBotChannel
