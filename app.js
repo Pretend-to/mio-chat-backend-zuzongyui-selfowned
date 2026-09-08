@@ -231,6 +231,15 @@ async function gracefulShutdown(signal) {
       logger.warn('广播进行中请求中断状态时出现警告:', error.message)
     }
 
+    // 0.5 清理哨兵子进程（避免重启后残留孤儿哨兵 / 双进程）
+    try {
+      const { getTriggerService } = await import('./lib/triggers/index.js')
+      getTriggerService().stopScheduler()
+      logger.info('哨兵子进程已清理')
+    } catch (error) {
+      logger.warn('清理哨兵进程时警告:', error.message)
+    }
+
     // 1. 关闭 Socket.IO 服务器
     try {
       if (global.middleware && global.middleware.socketServer) {
