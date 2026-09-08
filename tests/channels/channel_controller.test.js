@@ -64,19 +64,37 @@ test('Channel 管理 API 统一通过 OneBots，并兼容旧 wechat 记录', asy
   t.after(() => runtime.dispose())
   controller.initChannelController({ channelStore: store, runtime, onebotsGateway: gateway })
 
+  const catalogResponse = response()
+  controller.getChannelPlatformCatalog(request(), catalogResponse)
+  assert.equal(catalogResponse.body.data.version, 1)
+  assert.deepEqual(
+    catalogResponse.body.data.platforms.map(platform => platform.id),
+    ['wechat-clawbot'],
+  )
+  assert.equal(catalogResponse.body.data.platforms[0].auth.type, 'qrcode')
+
+  const invalidCreateResponse = response()
+  await controller.createChannel(request({}, { version: 2 }), invalidCreateResponse)
+  assert.equal(invalidCreateResponse.statusCode, 400)
+
   const createResponse = response()
   await controller.createChannel(request({}, {
-    name: 'QQ 测试',
-    type: 'onebots',
-    platform: 'qq',
-    protocol: 'onebot.v12',
+    adapter: {
+      runtime: 'onebots',
+      platform: 'wechat-clawbot',
+      protocol: 'onebot.v12',
+    },
+    profile: { name: '结构化创建', agentId: 'wechat-master' },
     config: { receive_mode: 'manual' },
   }), createResponse)
   const generic = await store.get(createResponse.body.data.id)
   assert.equal(generic.type, 'onebots')
-  assert.equal(generic.platform, 'qq')
+  assert.equal(generic.platform, 'wechat-clawbot')
   assert.equal(generic.protocol, 'onebot.v12')
-  assert.deepEqual(generic.config, { receive_mode: 'manual' })
+  assert.deepEqual(generic.config, {
+    outbound_text_format: 'markdown',
+    receive_mode: 'manual',
+  })
   await store.remove(generic.id)
 
   const created = await store.create({ name: '绑定测试', type: 'wechat' })

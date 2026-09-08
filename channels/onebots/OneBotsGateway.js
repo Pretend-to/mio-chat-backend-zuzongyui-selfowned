@@ -9,6 +9,7 @@ import {
   createLoopbackUrl,
   createProtocolConfig,
 } from './config.js'
+import { getPlatformDefinition } from './platformCatalog.js'
 
 const noopLogger = {
   debug() {},
@@ -162,11 +163,12 @@ export class OneBotsGateway {
       throw new TypeError(`Invalid OneBots platform: ${platform}`)
     }
     const loader = this.options.adapterLoaders?.[platform]
+    const packageName = getPlatformDefinition(platform)?.package ?? `@onebots/adapter-${platform}`
     try {
       if (loader) await loader()
-      else await import(`@onebots/adapter-${platform}`)
+      else await import(packageName)
     } catch (error) {
-      throw new Error(`OneBots adapter is not installed: @onebots/adapter-${platform}`, { cause: error })
+      throw new Error(`OneBots adapter is not installed: ${packageName}`, { cause: error })
     }
   }
 

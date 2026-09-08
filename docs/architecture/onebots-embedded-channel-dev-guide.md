@@ -143,7 +143,33 @@ export class OneBotsGateway {
 }
 ```
 
-### 3.2 ChannelRuntime 联动改造
+### 3.2 渠道发现与创建 API
+
+管理端不得硬编码 OneBots 平台列表。创建前先请求 `GET /api/channels/catalog`，根据返回的 `platforms[].configSchema` 渲染配置表单，再提交版本化请求：
+
+```json
+{
+  "version": 1,
+  "adapter": {
+    "runtime": "onebots",
+    "platform": "wechat-clawbot",
+    "protocol": "onebot.v12"
+  },
+  "profile": {
+    "name": "微信助手",
+    "agentId": "wechat-master",
+    "provider": "Vertex",
+    "model": "gemini-2.5-pro"
+  },
+  "config": {
+    "outbound_text_format": "markdown"
+  }
+}
+```
+
+后续平台通过 `registerChannelPlatform()` 注册名称、认证方式、能力和配置 schema；运行时再按 `platform` 懒加载对应的 `@onebots/adapter-<platform>`。旧版扁平 `POST /api/channels` 请求继续兼容。
+
+### 3.3 ChannelRuntime 联动改造
 在 `ChannelRuntime.js` 中：
 ```js
 export class ChannelRuntime {
