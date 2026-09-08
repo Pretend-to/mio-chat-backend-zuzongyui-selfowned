@@ -10,6 +10,7 @@ import {
   createProtocolConfig,
 } from './config.js'
 import { getPlatformDefinition } from './platformCatalog.js'
+import defaultLogger from '../../utils/logger.js'
 
 const noopLogger = {
   debug() {},
@@ -65,7 +66,7 @@ export class OneBotsGateway {
     this.app = options.app ?? null
     this.appFactory = options.appFactory ?? null
     this.clientFactory = options.clientFactory ?? null
-    this.logger = options.logger ?? noopLogger
+    this.logger = options.logger ?? defaultLogger
     // The ClawBot adapter uses process.cwd()/data/wechat-clawbot by default.
     // Keep this injectable so migration tests never touch the real session dir.
     this.sessionDataDir = path.resolve(
@@ -91,7 +92,7 @@ export class OneBotsGateway {
           // so an injected host can inspect the intended loopback policy.
           port: options.port ?? ONEBOTS_PORT,
           host: '127.0.0.1',
-          log_level: options.logLevel ?? 'warn',
+          log_level: options.logLevel ?? (process.env.LOG_LEVEL || 'info').toLowerCase(),
           general: {},
         }
         if (this.appFactory) {
@@ -243,31 +244,41 @@ export class OneBotsGateway {
       state.qr = { qrCodeUrl, qrcode, status: 'qr', refreshed: !!payload?.refreshed }
       state.error = null
       this.qrSessions.set(id, state.qr)
+      this.logger.info?.(`[OneBots] 账号 ${id} 生成登录二维码: ${qrCodeUrl || qrcode}`)
     }
     const onLogin = session => {
       state.status = 'login'
       state.session = session ?? null
       state.error = null
       state.qr = state.qr ? { ...state.qr, status: 'login' } : null
+      this.logger.info?.(`[OneBots] 账号 ${id} 扫码登录成功: botId=${session?.accountId}, userId=${session?.userId}`)
     }
-    const onReady = () => {
+    const onReady = async () => {
       state.status = 'online'
       state.error = null
+      if (typeof client?.getSession === 'function') {
+        const session = await client.getSession().catch(() => null)
+        if (session) state.session = session
+      }
       if (state.qr) state.qr = { ...state.qr, status: 'online' }
       this.qrSessions.delete(id)
+      this.logger.info?.(`[OneBots] 账号 ${id} iLink 会话已就绪并上线: botId=${state.session?.accountId}, userId=${state.session?.userId}`)
     }
     const onCredentialStale = error => {
       state.status = 'credential_stale'
       state.error = error ? asError(error).message : null
       // Keep the last QR available until the adapter emits a fresh one.
       if (state.qr) state.qr = { ...state.qr, status: 'credential_stale' }
+      this.logger.warn?.(`[OneBots] 账号 ${id} 凭证在服务端失效: ${state.error}`)
     }
     const onError = error => {
       state.error = asError(error).message
       if (state.status !== 'credential_stale') state.status = 'error'
+      this.logger.error?.(`[OneBots] 账号 ${id} 发生异常:`, error)
     }
     const onStop = () => {
       if (state.status !== 'disposed') state.status = 'offline'
+      this.logger.info?.(`[OneBots] 账号 ${id} 已停止下线`)
     }
 
     // The real adapter emits these on its iLink client. Supporting account
@@ -352,6 +363,11 @@ export class OneBotsGateway {
     this.attachAccountEvents(state)
     this.accounts.set(id, state)
     state.status = 'pending'
+    if (!state.session && typeof state.client?.getSession === 'function') {
+      state.client.getSession().then(s => {
+        if (s) state.session = s
+      }).catch(() => {})
+    }
 
     // Login can wait for a QR scan for several minutes. Return the state now,
     // while retaining a handled promise for diagnostics and stop/dispose.
@@ -385,16 +401,97 @@ export class OneBotsGateway {
     return state
   }
 
-  async requestQrLogin(channelId, platform = ONEBOTS_PLATFORM) {
+  async requestQrLogin(channelId, platform = ONEBOTS_PLATFORM, options = {}) {
+    let opts = options
+    let plat = platform
+    if (typeof platform === 'object' && platform !== null) {
+      opts = platform
+      plat = opts.platform ?? ONEBOTS_PLATFORM
+    }
     const channel = typeof channelId === 'object' ? channelId : null
-    const id = channel ? channel.id : channelId
-    let state = this.accounts.get(String(id))
-    if (!state) state = await this.startAccount({ id, platform: channel?.platform ?? platform, ...channel })
-    if (state.qr?.status === 'qr') return { ...state.qr }
-    if (state.status === 'online') return this.getAccountState(id)
-    // Wait for the first useful login event. A real iLink request may need a
-    // few seconds before it emits qr; a short 0ms race made the HTTP caller
-    // observe an empty result even though login was progressing normally.
+    const id = String(channel ? channel.id : channelId)
+    plat = channel?.platform ?? plat
+    const force = opts.force === true
+
+    let state = this.accounts.get(id)
+    if (!state) state = await this.startAccount({ id, platform: plat, ...channel })
+
+    // If an existing valid QR is already active and not forced, return it immediately.
+    if (!force && state.qr?.status === 'qr' && (state.qr.qrCodeUrl || state.qr.qrcode)) {
+      return { ...state.qr }
+    }
+
+    // Account is mounted. If interactive QR login can be triggered on the client:
+    const client = state.client ?? state.account?.client
+    if (typeof client?.runInteractiveQrLogin === 'function') {
+      state.interactiveLoginAbort?.abort(new DOMException('New QR login requested', 'AbortError'))
+      const controller = new AbortController()
+      state.interactiveLoginAbort = controller
+      let loginPromise
+      try {
+        loginPromise = client.runInteractiveQrLogin(controller.signal)
+      } catch (err) {
+        loginPromise = Promise.reject(err)
+      }
+      Promise.resolve(loginPromise).catch(error => {
+        if (controller.signal.aborted) return
+        this.logger.warn?.(`[OneBots] account ${id} QR login failed:`, error)
+        if (state.status === 'qr') {
+          state.status = (state.session || state.account?.status === 'online') ? 'online' : 'error'
+          state.error = asError(error).message
+        }
+      })
+
+      // Wait for the 'qr' event to be emitted by runInteractiveQrLogin
+      const waitMs = this.options.qrWaitTimeoutMs ?? 15_000
+      await new Promise(resolve => {
+        let timer
+        const finish = () => {
+          if (timer) clearTimeout(timer)
+          client.off?.('qr', onQr)
+          client.off?.('error', onError)
+          resolve()
+        }
+        const onQr = () => finish()
+        const onError = () => finish()
+        client.on?.('qr', onQr)
+        client.on?.('error', onError)
+        Promise.resolve(loginPromise).then(finish, finish)
+        timer = setTimeout(finish, waitMs)
+        timer.unref?.()
+      })
+
+      if (state.qr?.status === 'qr' && (state.qr.qrCodeUrl || state.qr.qrcode)) {
+        return { ...state.qr }
+      }
+    } else if (typeof client?.createLoginSession === 'function' || typeof state.account?.createLoginSession === 'function') {
+      const fn = client?.createLoginSession ?? state.account?.createLoginSession
+      const target = client?.createLoginSession ? client : state.account
+      try {
+        const botType = state.config?.bot_type ?? state.config?.botType
+        const session = await fn.call(target, { botType })
+        const qrCodeUrl = session.qrCodeUrl ?? session.qrcode_img_content ?? session.url ?? ''
+        const qrcode = session.qrcode ?? ''
+        state.status = 'qr'
+        state.qr = { qrCodeUrl, qrcode, status: 'qr', sessionKey: session.sessionKey }
+        this.qrSessions.set(id, state.qr)
+        if (typeof client?.waitForLogin === 'function' && session.sessionKey) {
+          client.waitForLogin(session.sessionKey).then(outcome => {
+            if (outcome?.connected && outcome?.session) {
+              state.status = 'login'
+              state.session = outcome.session
+            }
+          }).catch(err => {
+            this.logger.warn?.(`[OneBots] account ${id} waitForLogin error:`, err)
+          })
+        }
+        return { ...state.qr }
+      } catch (err) {
+        this.logger.warn?.(`[OneBots] account ${id} createLoginSession failed:`, err)
+      }
+    }
+
+    // Wait for in-flight startPromise if present
     const startPromise = state.startPromise
     if (startPromise) {
       const targets = [state.account?.client, state.account].filter(Boolean)
@@ -432,8 +529,6 @@ export class OneBotsGateway {
         }
         timer = setTimeout(finish, waitMs)
         timer.unref?.()
-        // A failed/synchronous mock start should release the request without
-        // waiting for the full QR timeout.
         startPromise.then(finish, finish)
       })
     }
@@ -444,6 +539,8 @@ export class OneBotsGateway {
     const id = String(typeof channelId === 'object' ? channelId.id : channelId)
     const state = this.accounts.get(id)
     if (!state) return false
+    state.interactiveLoginAbort?.abort(new DOMException('Account stopped', 'AbortError'))
+    state.interactiveLoginAbort = null
     if (state.stopPromise) return state.stopPromise
     state.status = 'offline'
     state.stopPromise = Promise.resolve().then(() => state.account.stop?.()).catch(error => {
@@ -485,13 +582,15 @@ export class OneBotsGateway {
     const id = String(typeof channelId === 'object' ? channelId.id : channelId)
     const state = this.accounts.get(id)
     if (!state) return null
+    const session = state.session
     return {
       id: state.id,
       account_id: state.id,
       platform: state.platform,
       status: state.status,
-      userId: state.session?.userId ?? state.account?.nickname ?? null,
-      botId: state.session?.accountId ?? null,
+      userId: session?.userId ?? null,
+      botId: session?.accountId ?? state.account?.nickname ?? null,
+      token: session?.token ?? null,
       qrCodeUrl: state.qr?.qrCodeUrl ?? null,
       qrcode: state.qr?.qrcode ?? null,
       error: state.error,
@@ -521,6 +620,11 @@ export class OneBotsGateway {
     const onDispatch = payload => {
       try {
         const event = typeof payload === 'string' ? JSON.parse(payload) : payload
+        const eventType = event?.detail_type || event?.message_type || event?.type || 'unknown'
+        const senderId = event?.user_id || event?.sender?.id || 'unknown'
+        const rawContent = event?.raw_message || event?.message?.[0]?.data?.text || ''
+        const preview = rawContent ? ` "${rawContent.slice(0, 40)}${rawContent.length > 40 ? '...' : ''}"` : ''
+        this.logger.info?.(`[OneBots] 📥 接收协议事件派发 [${id}] [${eventType}] from=${senderId}${preview}`)
         if (event?.type === 'message' && event.message_id != null) {
           state.inboundMetadata ??= new Map()
           state.inboundMetadata.set(String(event.message_id), {

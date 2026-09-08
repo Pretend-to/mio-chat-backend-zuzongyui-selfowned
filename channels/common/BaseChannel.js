@@ -446,17 +446,22 @@ export class BaseChannel {
   async _safeSend(from, contextToken, text) {
     const targetToken = contextToken || this.latestContextToken || null
     try {
-      for (const seg of this.splitTextToSegments(text, {
+      const segments = this.splitTextToSegments(text, {
         contextToken: targetToken,
         from,
-      })) {
+      })
+      for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i]
         const payload = this.buildSendMsg({
           contextToken: targetToken,
-          fromBot: this.client.botId,
+          fromBot: this.client?.botId,
           text: seg,
           to: from,
         })
         await this.doSendMessage(payload)
+        if (i < segments.length - 1) {
+          await new Promise((r) => setTimeout(r, 300))
+        }
       }
     } catch {}
   }
@@ -514,8 +519,13 @@ export class BaseChannel {
       }
       let text = packet.text || ''
       if (files.length > 0) {
-        const fileLinks = files.map((file) => `[文件: ${file.name}](${file.url})`).join('\n')
-        text = text && !text.startsWith('[文件:') ? `${text}\n${fileLinks}` : fileLinks
+        const fileLinks = files
+          .map((file) => `[文件: ${file.name}](${file.url})`)
+          .join('\n')
+        text =
+          text && !text.startsWith('[文件:')
+            ? `${text}\n${fileLinks}`
+            : fileLinks
       }
       const activeSid = sid || (await this.memory?.getActiveSession?.())
       const ctx = {
@@ -528,6 +538,9 @@ export class BaseChannel {
         text,
         ...packet.ctx,
       }
+      this.log?.info?.(
+        `[${this.channelType}:${this.id}] ⚡ 消息即时直通路由 (跳过防抖) | 来源: ${from} | 内容: "${(text || '').slice(0, 50)}"`,
+      )
       return this._route(text, ctx)
     }
 
@@ -595,6 +608,10 @@ export class BaseChannel {
       ? this.debounceConfig?.mediaMs || 10000
       : this.debounceConfig?.textMs || 5000
 
+    this.log?.info?.(
+      `[${this.channelType}:${this.id}] ⏳ 入站消息进入防抖缓冲桶 | 来源: ${from} | 文本段数: ${buf.textParts.length} | 富媒体: ${buf.hasMedia} | 等待窗口: ${delayMs}ms`,
+    )
+
     if (buf.timer) {
       clearTimeout(buf.timer)
     }
@@ -630,6 +647,10 @@ export class BaseChannel {
             text: mergedText,
             ...packet.ctx,
           }
+
+          this.log?.info?.(
+            `[${this.channelType}:${this.id}] 🚀 防抖窗口触发，启动消息处理 | 来源: ${from} | 会话: ${activeSid} | 聚合文本: "${mergedText.slice(0, 60)}" (图片: ${ctx.images.length}, 文件: ${ctx.files.length})`,
+          )
 
           // 保持并更新 typing 上下文
           this.startTyping(ctx, { sessionId: sid })
@@ -732,6 +753,9 @@ export class BaseChannel {
       sid = s.id
       ctx.sid = sid
     }
+    this.log?.info?.(
+      `[${this.channelType}:${this.id}] 🔀 消息统一路由分发 | 用户: ${ctx.from} | 会话: ${sid} | 文本: "${(text || '').slice(0, 50)}"`,
+    )
     return this._enqueueSession(sid, text.trim(), ctx)
   }
 
@@ -770,6 +794,9 @@ export class BaseChannel {
     // 如果当前会话空闲，立即获取锁并执行
     if (!this._sessionLocks.has(sid)) {
       this._sessionLocks.add(sid)
+      this.log?.info?.(
+        `[${this.channelType}:${this.id}] 🔒 获取会话单飞执行锁，开始处理 | 会话: ${sid}`,
+      )
       if (isFn) {
         return this._runSessionLegacyFn(sid, textOrFn)
       }
@@ -796,6 +823,9 @@ export class BaseChannel {
       }
       queue.push(queueItem)
       const rank = queue.length
+      this.log?.info?.(
+        `[${this.channelType}:${this.id}] ⏳ 会话正在执行其他任务，当前请求已排队 | 会话: ${sid} | 当前排位: [${rank}] | 内容: "${text.slice(0, 40)}"`,
+      )
 
       // 仅对真实活人用户的输入进行实时排位反馈（排除后台任务、哨兵与静默入队）
       if (!ctx.isTask && !ctx.isWake && ctx.from && !ctx.silentQueue && !isFn) {
@@ -832,6 +862,9 @@ export class BaseChannel {
     const queue = this._sessionWaitingQueues?.get(sid)
     if (!queue || queue.length === 0) {
       this._sessionLocks.delete(sid)
+      this.log?.info?.(
+        `[${this.channelType}:${this.id}] 🔓 会话排队已清空，释放单飞执行锁 | 会话: ${sid}`,
+      )
       await this.stopTyping({}, { sessionId: sid })
       return
     }
@@ -1087,12 +1120,15 @@ export class BaseChannel {
     }
     const soul = await this.memory.readSoul()
     const globalMem = await this.memory.readAllGlobal()
-    let sid = ctx.sid || (await this.memory.getActiveSession())
+    let sid = ctx.sid || (await this.memory?.getActiveSession())
     if (!sid) {
       const s = await this.memory.createSession({ title: '默认会话' })
       await this.memory.setActiveSession(s.id)
       sid = s.id
     }
+    this.log?.info?.(
+      `[${this.channelType}:${this.id}] 🧠 进入 LLM 推理处理流水线 | 会话: ${sid} | 来源: ${ctx.from} | 模型: ${this.provider || 'default'}/${this.model || 'default'} | 文本长度: ${text.length}`,
+    )
     const crystal = await this.memory.getCrystal(sid)
     const pendingMemories =
       typeof this.memory.getPendingMemories === 'function'
@@ -1528,7 +1564,7 @@ export class BaseChannel {
                     `[${this.channelType}] ⚠️ 结构化卡片发送异常 (${e.message})`,
                   )
                 }
-                await new Promise((r) => setTimeout(r, 100))
+                await new Promise((r) => setTimeout(r, 400))
               }
             }
 
@@ -1553,7 +1589,7 @@ export class BaseChannel {
                 this.log?.info?.(
                   `[${this.channelType}] 📤 实时文本块发送结果: ${JSON.stringify(sendRes)}`,
                 )
-                await new Promise((r) => setTimeout(r, 80))
+                await new Promise((r) => setTimeout(r, 400))
               }
             }
 
@@ -1606,6 +1642,11 @@ export class BaseChannel {
       }
 
       await sendQueue
+
+      const processDuration = Date.now() - activeJobObj.startTime
+      this.log?.info?.(
+        `[${this.channelType}:${this.id}] ✨ LLM 交互完成 (耗时: ${processDuration}ms) | 会话: ${sid} | 下发分块数: ${emittedBlocks.length}`,
+      )
 
       // 会话持久化落盘（包含完整 Tool Calls、参数、运行结果、思考链以及文本节点）
       if (

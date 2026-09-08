@@ -24,9 +24,11 @@ test('Channel 管理 API 统一通过 OneBots，并兼容旧 wechat 记录', asy
   t.after(() => fs.promises.rm(tempDir, { force: true, recursive: true }))
   const store = new ChannelStore({ file: path.join(tempDir, 'channels.json') })
   const accountStates = new Map()
+  const qrCalls = []
   const gateway = {
     async init() {},
-    async requestQrLogin(channel) {
+    async requestQrLogin(channel, platform, options) {
+      qrCalls.push({ channel, platform, options })
       accountStates.set(channel.id, {
         botId: 'bot-9',
         status: 'online',
@@ -99,9 +101,10 @@ test('Channel 管理 API 统一通过 OneBots，并兼容旧 wechat 记录', asy
 
   const created = await store.create({ name: '绑定测试', type: 'wechat' })
   const qrResponse = response()
-  await controller.getChannelQrcode(request({ id: created.id }), qrResponse)
+  await controller.getChannelQrcode(request({ id: created.id }, { force: true }), qrResponse)
   assert.equal(qrResponse.body.data.qrcode, 'qr-1')
   assert.equal(qrResponse.body.data.img, 'https://example.com/qr.png')
+  assert.equal(qrCalls[0].options.force, true)
 
   const pollResponse = response()
   await controller.pollChannelQr(request({ id: created.id }, { qrcode: 'qr-1' }), pollResponse)

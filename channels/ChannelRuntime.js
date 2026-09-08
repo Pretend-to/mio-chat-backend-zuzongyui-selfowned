@@ -1,6 +1,7 @@
 import { createSessionPersistence } from '../lib/chat/persistence/createSessionPersistence.js'
 import { createBackendLlm } from './llm.js'
 import { isOneBotsChannel, resolveOneBotsPlatform } from './onebots/config.js'
+import logger from '../utils/logger.js'
 
 /**
  * ChannelRuntime — 渠道运行时管理器（M6 后端）
@@ -18,6 +19,7 @@ export class ChannelRuntime {
    * @param {(channel)=>object} [opts.clientFactory] 自定义 client 工厂（测试注入 mock）
    * @param {object} [opts.onebotsGateway] OneBots 网关（可注入，默认按需加载）
    * @param {(options)=>object|Promise<object>} [opts.onebotChannelFactory] OneBotChannel 工厂
+   * @param {object} [opts.logger] 日志器（默认系统全局 logger）
    */
   constructor({
     channelStore,
@@ -29,9 +31,11 @@ export class ChannelRuntime {
     persistenceFactory = createSessionPersistence,
     persistenceMode = process.env.MIO_CHANNEL_PERSISTENCE_MODE || 'legacy',
     prisma = null,
+    logger: customLogger = null,
   } = {}) {
     if (!channelStore) throw new Error('ChannelRuntime requires channelStore')
     this.channelStore = channelStore
+    this.logger = customLogger || logger
     this.llm = llm || createBackendLlm()
     this.memoryBase = memoryBase
     this.clientFactory = clientFactory
@@ -61,7 +65,7 @@ export class ChannelRuntime {
     if (!this.onebotsGateway) {
       const mod = await import('./onebots/OneBotsGateway.js')
       const Gateway = mod.OneBotsGateway || mod.default
-      if (typeof Gateway === 'function') this.onebotsGateway = new Gateway()
+      if (typeof Gateway === 'function') this.onebotsGateway = new Gateway({ logger: this.logger })
       else if (Gateway) this.onebotsGateway = Gateway
     }
     if (!this.onebotsGateway) {
@@ -143,6 +147,8 @@ export class ChannelRuntime {
     if (this.running.has(channelId)) return this.running.get(channelId).chn
 
     const agentId = channel.agentId || 'wechat-master'
+    const platform = resolveOneBotsPlatform(channel)
+    this.logger.info?.(`[ChannelRuntime] 🚀 正在启动渠道 "${channelId}" (type=${channel.type}, platform=${platform}, masterId=${channel.userId || channel.botId})`)
     const memory = await this.createMemory(agentId, { recover: true })
     let client
     let gateway = null
@@ -169,7 +175,7 @@ export class ChannelRuntime {
         llm: this.llm,
         provider: savedProvider,
         model: savedModel,
-        logger: console,
+        logger: this.logger,
         onActivity: () => {
           this.channelStore.update(channelId, { lastActive: Date.now() }).catch(() => {})
         },
@@ -179,13 +185,15 @@ export class ChannelRuntime {
         ...commonOptions,
         channel,
         gateway,
-        platform: resolveOneBotsPlatform(channel),
+        platform,
       })
       await chn.start()
       this.running.set(channelId, { channel, chn, memory, gateway, onebots })
       await this.channelStore.update(channelId, { status: 'running' })
+      this.logger.info?.(`[ChannelRuntime] ✅ 渠道 "${channelId}" 启动成功并进入运行状态 (running)`)
       return chn
     } catch (error) {
+      this.logger.error?.(`[ChannelRuntime] ❌ 渠道 "${channelId}" 启动失败:`, error)
       // A partially started embedded account otherwise keeps polling even
       // though no Channel instance owns it.
       if (onebots && gateway?.stopAccount) {
@@ -197,6 +205,7 @@ export class ChannelRuntime {
 
   /** 停止渠道（停止长轮询 + notifyStop + 状态落 stopped） */
   async stop(channelId) {
+    this.logger.info?.(`[ChannelRuntime] 🛑 正在停止渠道 "${channelId}"...`)
     const entry = this.running.get(channelId)
     let channel = entry?.channel
     if (!channel) channel = await this.channelStore.get(channelId)
@@ -214,7 +223,11 @@ export class ChannelRuntime {
       } catch (error) { if (!firstError) firstError = error }
     }
     await this.channelStore.update(channelId, { status: 'stopped' })
-    if (firstError) throw firstError
+    if (firstError) {
+      this.logger.error?.(`[ChannelRuntime] ⚠️ 停止渠道 "${channelId}" 发生异常:`, firstError)
+      throw firstError
+    }
+    this.logger.info?.(`[ChannelRuntime] ⏹️ 渠道 "${channelId}" 已停止 (stopped)`)
   }
 
   async stopAll() {

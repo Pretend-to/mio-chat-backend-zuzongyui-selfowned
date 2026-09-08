@@ -282,3 +282,53 @@ test('OneBotsGateway does not create a legacy session when credentials are incom
   assert.equal(fs.existsSync(sessionDataDir), false)
   await gateway.dispose()
 })
+
+test('OneBotsGateway requestQrLogin triggers interactive QR login even when account is online', async () => {
+  const app = makeApp()
+  const gateway = new OneBotsGateway({ app, skipRegistration: true })
+  await gateway.startAccount({ id: 'online-channel', platform: 'wechat-clawbot' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(gateway.getAccountState('online-channel').status, 'online')
+
+  const account = app.adapters.get('wechat-clawbot').accounts.get('online-channel')
+  let interactiveCalled = 0
+  account.client.runInteractiveQrLogin = async signal => {
+    interactiveCalled++
+    account.client.emit('qr', { qrCodeUrl: 'https://weixin.qq.com/qr/fresh-123', qrcode: 'ticket-abc' })
+  }
+
+  const qr = await gateway.requestQrLogin('online-channel')
+  assert.equal(interactiveCalled, 1)
+  assert.equal(qr.qrcode, 'ticket-abc')
+  assert.equal(qr.qrCodeUrl, 'https://weixin.qq.com/qr/fresh-123')
+  assert.equal(gateway.getAccountState('online-channel').status, 'qr')
+
+  await gateway.dispose()
+})
+
+test('OneBotsGateway requestQrLogin supports force option to refresh QR code', async () => {
+  const app = makeApp()
+  const gateway = new OneBotsGateway({ app, skipRegistration: true })
+  await gateway.startAccount({ id: 'force-channel', platform: 'wechat-clawbot' })
+  await new Promise(resolve => setImmediate(resolve))
+
+  const account = app.adapters.get('wechat-clawbot').accounts.get('force-channel')
+  let seq = 0
+  account.client.runInteractiveQrLogin = async signal => {
+    seq++
+    account.client.emit('qr', { qrCodeUrl: `https://weixin.qq.com/qr/${seq}`, qrcode: `ticket-${seq}` })
+  }
+
+  const firstQr = await gateway.requestQrLogin('force-channel')
+  assert.equal(firstQr.qrcode, 'ticket-1')
+
+  // Calling again without force returns cached active QR
+  const cachedQr = await gateway.requestQrLogin('force-channel')
+  assert.equal(cachedQr.qrcode, 'ticket-1')
+
+  // Calling with force: true forces a fresh QR
+  const forcedQr = await gateway.requestQrLogin('force-channel', 'wechat-clawbot', { force: true })
+  assert.equal(forcedQr.qrcode, 'ticket-2')
+
+  await gateway.dispose()
+})

@@ -82,11 +82,11 @@ export function parseErrorDetails(error) {
   // 3. 从文本提取 request id (若之前未提取到)
   if (!requestId) {
     const reqMatch =
-      text.match(/\(request\s*id:\s*([^\)]+)\)/i) ||
+      text.match(/\(request\s*id:\s*([^)]+)\)/i) ||
       text.match(/\brequest[-_ ]?id[:=]\s*([a-zA-Z0-9_-]+)/i)
     if (reqMatch) {
       requestId = reqMatch[1].trim()
-      text = text.replace(/\(request\s*id:\s*[^\)]+\)/gi, '').trim()
+      text = text.replace(/\(request\s*id:\s*[^)]+\)/gi, '').trim()
     }
   }
 

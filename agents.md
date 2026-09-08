@@ -41,3 +41,9 @@ Do not commit `.env` files, database files, runtime channel data, or credentials
 ## Commit & Pull Request Guidelines
 
 Follow the repository's history with concise Conventional Commit-style messages such as `feat(channel): ...`, `fix: ...`, or `docs: ...`. Keep commits focused. The project notes allow direct work on `master`; when a pull request is used, describe behavior changes, test commands/results, schema or configuration impact, and any required frontend protocol coordination.
+
+> [!IMPORTANT]
+> **Upstream Dependency & Branch Release Gate (OneBots Patch)**:
+> The backend WeChat integration on `codex/onebots-wechat-migration` relies on a custom patch (`patches/@onebots__adapter-wechat-clawbot@3.0.12.patch`).
+> **DO NOT merge this branch into `master` or release `master`** until the upstream `onebots` repository merges our PR and officially publishes the new version to npm. Once published upstream, remove `patchedDependencies` from `package.json`, bump the dependency, verify all tests, and only then proceed with merging to `master`.
+
