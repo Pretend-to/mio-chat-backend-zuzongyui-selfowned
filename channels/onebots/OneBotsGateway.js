@@ -18,6 +18,20 @@ const noopLogger = {
 }
 
 const asError = value => value instanceof Error ? value : new Error(String(value))
+const INBOUND_METADATA_MAX_SIZE = 256
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function normalizeContextTokens(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([peerId, token]) => nonEmptyString(peerId) && nonEmptyString(token))
+      .map(([peerId, token]) => [String(peerId), String(token).trim()]),
+  )
+}
 
 /**
  * OneBots 3.0.12 rejects `group_id: null`/`""` before its mapper can apply
@@ -51,6 +65,11 @@ export class OneBotsGateway {
     this.appFactory = options.appFactory ?? null
     this.clientFactory = options.clientFactory ?? null
     this.logger = options.logger ?? noopLogger
+    // The ClawBot adapter uses process.cwd()/data/wechat-clawbot by default.
+    // Keep this injectable so migration tests never touch the real session dir.
+    this.sessionDataDir = path.resolve(
+      options.sessionDataDir ?? path.join(process.cwd(), 'data', 'wechat-clawbot'),
+    )
     this.accounts = new Map()
     this.qrSessions = new Map()
     this.initialized = false
@@ -128,6 +147,47 @@ export class OneBotsGateway {
           ?? 'markdown',
       }),
       [ONEBOTS_PROTOCOL]: createProtocolConfig(protocol),
+    }
+  }
+
+  /**
+   * Seed the adapter's native session file from a legacy ChannelStore record.
+   * The adapter deliberately does not read token/botId from account config, so
+   * this bridge is needed for existing installations. Exclusive creation is
+   * important: a newer QR login must never be replaced by stale legacy data.
+   */
+  async seedLegacySession(channelConfig, accountId = null) {
+    const token = nonEmptyString(channelConfig?.token)
+    const botId = nonEmptyString(channelConfig?.botId ?? channelConfig?.bot_id)
+    if (!token || !botId) return false
+
+    const id = String(accountId ?? channelConfig?.id ?? channelConfig?.account_id ?? '').trim()
+    if (!id) return false
+    const filePath = path.join(this.sessionDataDir, `${encodeURIComponent(id)}.json`)
+    const session = {
+      token,
+      accountId: botId,
+      ...(nonEmptyString(channelConfig?.userId ?? channelConfig?.user_id)
+        ? { userId: nonEmptyString(channelConfig?.userId ?? channelConfig?.user_id) }
+        : {}),
+      contextTokens: normalizeContextTokens(channelConfig?.contextTokens),
+    }
+
+    await fs.promises.mkdir(this.sessionDataDir, { recursive: true, mode: 0o700 })
+    let handle = null
+    let created = false
+    try {
+      handle = await fs.promises.open(filePath, 'wx', 0o600)
+      created = true
+      await handle.writeFile(`${JSON.stringify(session, null, 2)}\n`, 'utf8')
+      await handle.sync()
+      return true
+    } catch (error) {
+      if (error?.code === 'EEXIST') return false
+      if (created) await fs.promises.unlink(filePath).catch(() => {})
+      throw error
+    } finally {
+      await handle?.close().catch(() => {})
     }
   }
 
@@ -217,6 +277,7 @@ export class OneBotsGateway {
     if (this.disposed) throw new Error('OneBotsGateway has been disposed')
     const normalized = this.normalizeChannelConfig(channelConfig)
     const id = normalized.account_id
+    await this.seedLegacySession(channelConfig, id)
     const existing = this.accounts.get(id)
     if (existing) {
       if (existing.platform !== normalized.platform) {
@@ -379,6 +440,18 @@ export class OneBotsGateway {
     return true
   }
 
+  async deleteAccount(channelId) {
+    const id = String(typeof channelId === 'object' ? channelId.id : channelId)
+    await this.stopAccount(id)
+    const filePath = path.join(this.sessionDataDir, `${encodeURIComponent(id)}.json`)
+    await fs.promises.unlink(filePath).catch(error => {
+      if (error?.code !== 'ENOENT') throw error
+    })
+    this.accounts.delete(id)
+    this.qrSessions.delete(id)
+    return true
+  }
+
   getQrCode(channelId) {
     const id = String(typeof channelId === 'object' ? channelId.id : channelId)
     const qr = this.qrSessions.get(id)
@@ -424,7 +497,20 @@ export class OneBotsGateway {
     const client = await factory(clientConfig, state)
     const onDispatch = payload => {
       try {
-        client.ingest(typeof payload === 'string' ? JSON.parse(payload) : payload)
+        const event = typeof payload === 'string' ? JSON.parse(payload) : payload
+        if (event?.type === 'message' && event.message_id != null) {
+          state.inboundMetadata ??= new Map()
+          state.inboundMetadata.set(String(event.message_id), {
+            extensions: event.extensions,
+            platform: event.platform,
+            raw_event: event.raw_event,
+          })
+          if (state.inboundMetadata.size > INBOUND_METADATA_MAX_SIZE) {
+            const oldest = state.inboundMetadata.keys().next().value
+            if (oldest != null) state.inboundMetadata.delete(oldest)
+          }
+        }
+        client.ingest(event)
       } catch (error) {
         this.logger.warn?.(`[OneBots] failed to ingest ${id} dispatch`, error)
       }
@@ -433,6 +519,13 @@ export class OneBotsGateway {
     state.clientFacade = client
     state.clientDetach = () => protocol.off?.('dispatch', onDispatch)
     return client
+  }
+
+  /** Recover adapter-specific fields discarded by the generic imhelper event projection. */
+  getInboundMetadata(channelId, messageId) {
+    if (messageId == null) return null
+    const id = String(typeof channelId === 'object' ? channelId.id : channelId)
+    return this.accounts.get(id)?.inboundMetadata?.get(String(messageId)) ?? null
   }
 
   async callAction(channelId, action, params = {}) {

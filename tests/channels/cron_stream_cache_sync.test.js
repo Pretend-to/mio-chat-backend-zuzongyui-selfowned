@@ -7,7 +7,7 @@ import fs from 'node:fs'
 global.logger = global.logger || console
 
 import { MemoryStore } from '../../channels/memory/index.js'
-import { WechatChannel } from '../../channels/wechat/WechatChannel.js'
+import { OneBotChannel } from '../../channels/onebots/OneBotChannel.js'
 import { createBackendLlm } from '../../channels/llm.js'
 import streamCache from '../../lib/server/socket.io/services/streamCache.js'
 
@@ -66,7 +66,7 @@ test('Channel 任务流式执行：微信下发与 StreamCache 异步沉淀完�
     },
   }
 
-  const chn = new WechatChannel({
+  const chn = new OneBotChannel({
     channelId,
     client,
     id: channelId,
@@ -92,7 +92,9 @@ test('Channel 任务流式执行：微信下发与 StreamCache 异步沉淀完�
 
     // 验证 1：微信端收到回复
     assert.strictEqual(client.sent.length, 1, '微信端必须收到早报内容')
-    assert.strictEqual(client.sent[0].context_token, 'CTX_CRON')
+    assert.equal(client.sent[0].scene_type, 'private')
+    assert.equal(client.sent[0].scene_id, MASTER)
+    assert.match(client.sent[0].message[0].data.text, /3U Alpha Fund 早报/)
 
     // 验证 2：Web 离线情况下，streamCache 是否完整沉淀快照
     const adminSnapshot = streamCache.snapshot('random_admin_client_id', channelId)

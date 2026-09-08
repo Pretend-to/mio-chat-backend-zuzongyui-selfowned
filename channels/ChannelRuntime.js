@@ -1,14 +1,12 @@
-import { IlinkClient } from './wechat/IlinkClient.js'
 import { createSessionPersistence } from '../lib/chat/persistence/createSessionPersistence.js'
-import { WechatChannel } from './wechat/WechatChannel.js'
-import { createBackendLlm } from './wechat/llm.js'
-import { isOneBotsChannel } from './onebots/config.js'
+import { createBackendLlm } from './llm.js'
+import { isOneBotsChannel, ONEBOTS_PLATFORM } from './onebots/config.js'
 
 /**
  * ChannelRuntime — 渠道运行时管理器（M6 后端）
  *
- * 职责：把「已绑定的渠道配置」拉起为真实运行的 WechatChannel（长轮询），
- *       并统一管理启/停 / 运行态。
+ * 职责：把「已绑定的渠道配置」挂载到内嵌 OneBots 运行时，
+ *       并统一管理启/停 / 运行态。历史 `wechat` 记录作为兼容别名处理。
  * 解耦：llm 可注入（默认 createBackendLlm）；client 可注入（测试用 mock）。
  */
 export class ChannelRuntime {
@@ -46,7 +44,7 @@ export class ChannelRuntime {
     this.running = new Map() // channelId -> { channel, chn, memory }
   }
 
-  /** OneBots 渠道判定。没有显式 driver 的旧微信配置始终走 iLink。 */
+  /** OneBots 渠道判定；历史 `wechat` 类型也统一由 OneBots 接管。 */
   static isOneBotsChannel(channel) {
     return isOneBotsChannel(channel)
   }
@@ -89,7 +87,7 @@ export class ChannelRuntime {
     return this.onebotChannelFactory
   }
 
-  /** Initialize the optional OneBots gateway. Legacy restoreRunningChannels remains supported. */
+  /** Initialize OneBots and restore persisted running channels. */
   async init() {
     const channels = typeof this.channelStore.listInternal === 'function'
       ? await this.channelStore.listInternal()
@@ -97,8 +95,7 @@ export class ChannelRuntime {
     const onebots = channels.filter((channel) => this.isOneBotsChannel(channel))
     if (onebots.length > 0) await this.getOnebotsGateway({ initialize: true })
 
-    // Restore OneBots entries here because the legacy restore helper requires an iLink token.
-    // Existing callers may still invoke restoreRunningChannels for iLink channels.
+    // Restore every supported channel through OneBots.
     for (const channel of onebots) {
       if (channel.status !== 'running' || (!channel.userId && !channel.botId)) continue
       try { await this.start(channel.id) } catch (error) {
@@ -139,7 +136,8 @@ export class ChannelRuntime {
     const channel = await this.channelStore.get(channelId)
     if (!channel) throw new Error(`channel ${channelId} not found`)
     const onebots = this.isOneBotsChannel(channel)
-    if (onebots ? (!channel.userId && !channel.botId) : (!channel.token || !channel.userId)) {
+    if (!onebots) throw new Error(`channel type is not supported by OneBots: ${channel.type || 'unknown'}`)
+    if (!channel.userId && !channel.botId) {
       throw new Error(`channel ${channelId} not bound`)
     }
     if (this.running.has(channelId)) return this.running.get(channelId).chn
@@ -149,22 +147,16 @@ export class ChannelRuntime {
     let client
     let gateway = null
     try {
-      if (onebots) {
-        gateway = await this.getOnebotsGateway({ initialize: true })
-        await gateway.startAccount(channel)
-        if (typeof gateway.createClient !== 'function') {
-          throw new Error('OneBots gateway does not provide createClient(channel)')
-        }
-        client = await gateway.createClient(channel)
-      } else {
-        client = this.clientFactory
-          ? await this.clientFactory(channel)
-          : (() => {
-            const c = new IlinkClient()
-            c.setAuth({ token: channel.token, botId: channel.botId, userId: channel.userId })
-            return c
-          })()
+      gateway = await this.getOnebotsGateway({ initialize: true })
+      const latestContextToken = await memory.getAgentMeta('latestContextToken', null)
+      const accountConfig = latestContextToken && channel.userId
+        ? { ...channel, contextTokens: { [channel.userId]: latestContextToken } }
+        : channel
+      await gateway.startAccount(accountConfig)
+      if (typeof gateway.createClient !== 'function') {
+        throw new Error('OneBots gateway does not provide createClient(channel)')
       }
+      client = await gateway.createClient(channel)
       const savedProvider = await memory.getAgentMeta('provider', channel.provider || null)
       const savedModel = await memory.getAgentMeta('model', channel.model || null)
 
@@ -182,13 +174,13 @@ export class ChannelRuntime {
           this.channelStore.update(channelId, { lastActive: Date.now() }).catch(() => {})
         },
       }
-      let chn
-      if (onebots) {
-        const factory = await this.getOnebotChannelFactory()
-        chn = await factory({ ...commonOptions, channel, gateway })
-      } else {
-        chn = new WechatChannel(commonOptions)
-      }
+      const factory = await this.getOnebotChannelFactory()
+      const chn = await factory({
+        ...commonOptions,
+        channel,
+        gateway,
+        platform: channel.platform || ONEBOTS_PLATFORM,
+      })
       await chn.start()
       this.running.set(channelId, { channel, chn, memory, gateway, onebots })
       await this.channelStore.update(channelId, { status: 'running' })

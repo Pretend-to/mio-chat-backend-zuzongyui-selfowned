@@ -51,6 +51,7 @@ test('ChannelRuntime uses injected OneBots gateway/factory and stops account', a
     onebotChannelFactory: options => {
       assert.equal(options.gateway, gateway)
       assert.equal(options.channel.id, 'onebot-1')
+      assert.equal(options.platform, 'wechat-clawbot')
       return fakeChannel
     },
     persistenceFactory: async () => makeMemory(),
@@ -90,6 +91,42 @@ test('ChannelRuntime rolls back a OneBots account when Channel startup fails', a
   await assert.rejects(runtime.start('onebot-fail'), /channel start failed/)
   assert.deepEqual(calls, ['account.start', 'account.stop'])
   assert.equal(runtime.isRunning('onebot-fail'), false)
+})
+
+test('ChannelRuntime migrates legacy wechat identity and latest context into OneBots', async () => {
+  const store = makeStore({
+    id: 'legacy-wechat', type: 'wechat', agentId: 'agent',
+    token: 'legacy-token', botId: 'legacy-bot', userId: 'legacy-user', status: 'bound',
+  })
+  let mounted = null
+  let channelOptions = null
+  const gateway = {
+    async init() {},
+    async startAccount(channel) { mounted = channel },
+    async createClient() { return {} },
+    async stopAccount() {},
+  }
+  const runtime = new ChannelRuntime({
+    channelStore: store,
+    onebotsGateway: gateway,
+    onebotChannelFactory: options => {
+      channelOptions = options
+      return { async start() {}, async stop() {} }
+    },
+    persistenceFactory: async () => ({
+      ...makeMemory(),
+      async getAgentMeta(key, fallback) {
+        return key === 'latestContextToken' ? 'legacy-context' : fallback
+      },
+    }),
+  })
+
+  await runtime.start('legacy-wechat')
+  assert.equal(mounted.token, 'legacy-token')
+  assert.equal(mounted.botId, 'legacy-bot')
+  assert.deepEqual(mounted.contextTokens, { 'legacy-user': 'legacy-context' })
+  assert.equal(channelOptions.platform, 'wechat-clawbot')
+  await runtime.dispose()
 })
 
 test('OneBots QR controller delegates QR and confirmed state to gateway', async () => {

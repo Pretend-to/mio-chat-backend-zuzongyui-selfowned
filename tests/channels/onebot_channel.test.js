@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { OneBotChannel, extractMedia, extractText } from '../../channels/onebots/OneBotChannel.js'
+import storageService from '../../lib/storage/StorageService.js'
 
 function makeMemory() {
   const values = new Map()
@@ -36,6 +37,12 @@ function makeChannel(client = makeClient()) {
     llm: { process: async () => ({ text: '' }) },
     debounceEnabled: false,
   })
+  return { channel, client }
+}
+
+function makeWechatChannel(client = makeClient()) {
+  const { channel } = makeChannel(client)
+  channel.platform = 'wechat-clawbot'
   return { channel, client }
 }
 
@@ -128,4 +135,134 @@ test('OneBot sends text/media through typed SDK methods and typing action', asyn
     { user_id: 'master', context_token: 'ctx', status: 'active' },
     { user_id: 'master', context_token: 'ctx', status: 'idle' },
   ])
+})
+
+test('微信 OneBot 单图片通过 download_media 解密并转存为图片 URL', async () => {
+  const { channel, client } = makeWechatChannel()
+  const calls = []
+  const packets = []
+  client.call = async (action, params) => {
+    calls.push({ action, params })
+    return { status: 'ok', data: { base64: 'aGVsbG8=', mime_type: 'image/png', file_name: 'a.png' } }
+  }
+  channel.bufferToImageUrl = async buffer => `stored:image:${buffer.toString()}`
+  channel.enqueueInboundDebounce = async (_from, packet) => { packets.push(packet) }
+
+  await channel.handleIncomingMessage({
+    message_type: 'private',
+    user_id: 'master',
+    message_id: '42',
+    content: [{ type: 'image', data: { file_id: 'enc-image', url: 'https://cdn.invalid/image' } }],
+  })
+
+  assert.equal(packets.length, 1)
+  assert.deepEqual(calls, [{ action: 'download_media', params: { message_id: '42' } }])
+  assert.deepEqual(await packets[0].pendingMediaPromise, { images: ['stored:image:hello'], files: [] })
+})
+
+test('微信 OneBot 单文件通过 StorageService 持久化', async () => {
+  const { channel, client } = makeWechatChannel()
+  const packets = []
+  client.call = async () => ({ data: { base64: 'ZmlsZQ==', mime_type: 'text/plain', file_name: 'hello.txt' } })
+  channel.enqueueInboundDebounce = async (_from, packet) => { packets.push(packet) }
+  const originalUpload = storageService.upload
+  const uploads = []
+  storageService.upload = async (...args) => {
+    uploads.push(args)
+    return { url: '/uploads/hello.txt' }
+  }
+  try {
+    await channel.handleIncomingMessage({
+      message_type: 'private',
+      user_id: 'master',
+      message_id: '43',
+      content: [{ type: 'file', data: { file_id: 'enc-file', name: 'fallback.txt' } }],
+    })
+    assert.deepEqual(await packets[0].pendingMediaPromise, {
+      images: [],
+      files: [{ name: 'hello.txt', url: '/uploads/hello.txt' }],
+    })
+    assert.equal(uploads[0][0].toString(), 'file')
+    assert.deepEqual(uploads[0].slice(1), [
+      'hello.txt',
+      'file',
+      { contentType: 'text/plain' },
+    ])
+  } finally {
+    storageService.upload = originalUpload
+  }
+})
+
+test('微信 OneBot 多媒体无可靠 item_index 时只跳过媒体并保留消息', async () => {
+  const { channel, client } = makeWechatChannel()
+  const packets = []
+  const warnings = []
+  let callCount = 0
+  client.call = async () => {
+    callCount++
+    return { data: { base64: 'aGVsbG8=' } }
+  }
+  channel.log = { warn: message => warnings.push(message) }
+  channel.enqueueInboundDebounce = async (_from, packet) => { packets.push(packet) }
+
+  await channel.handleIncomingMessage({
+    message_type: 'private',
+    user_id: 'master',
+    message_id: '44',
+    content: [
+      { type: 'image', data: { file_id: 'first' } },
+      { type: 'file', data: { file_id: 'second' } },
+    ],
+  })
+
+  assert.equal(packets.length, 1)
+  assert.deepEqual(await packets[0].pendingMediaPromise, { images: [], files: [] })
+  assert.equal(warnings.length, 1)
+  assert.equal(callCount, 0)
+})
+
+test('微信 OneBot 合并网关原始元数据并在关闭防抖时等待媒体解密', async () => {
+  const client = makeClient()
+  const rawEvent = {
+    message_id: 45,
+    item_list: [{ image_item: { media: { encrypt_query_param: 'enc-image' } } }],
+  }
+  const gateway = {
+    getInboundMetadata: () => ({
+      raw_event: rawEvent,
+      extensions: { wechat_clawbot: { context_token: 'ctx-45' } },
+    }),
+  }
+  const channel = new OneBotChannel({
+    channel: { id: 'wechat-channel', type: 'wechat' },
+    client,
+    gateway,
+    memory: makeMemory(),
+    masterId: 'master',
+    llm: { process: async () => ({ text: '' }) },
+    debounceEnabled: false,
+    platform: 'wechat-clawbot',
+  })
+  const calls = []
+  client.call = async (action, params) => {
+    calls.push({ action, params })
+    return { data: { base64: 'aGVsbG8=', mime_type: 'image/png' } }
+  }
+  channel.bufferToImageUrl = async buffer => `stored:image:${buffer.toString()}`
+  let routed
+  channel._route = async (text, ctx) => { routed = { text, ctx } }
+
+  await channel.handleIncomingMessage({
+    message_type: 'private',
+    user_id: 'master',
+    message_id: '45',
+    content: [{ type: 'image', data: { file_id: 'enc-image' } }],
+  })
+
+  assert.deepEqual(calls[0], {
+    action: 'download_media',
+    params: { message_id: '45', item_index: 0 },
+  })
+  assert.deepEqual(routed.ctx.images, ['stored:image:hello'])
+  assert.equal(routed.ctx.contextToken, 'ctx-45')
 })

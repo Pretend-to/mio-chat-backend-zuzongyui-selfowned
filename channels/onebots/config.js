@@ -17,21 +17,25 @@ export const ONEBOTS_PLATFORM = 'wechat-clawbot'
 export const ONEBOTS_RECEIVE_MODE = 'manual'
 
 /**
- * Explicit rollout gate. Existing `wechat` records stay on the legacy iLink
- * client unless the deployment opts in with MIO_WECHAT_DRIVER=onebots.
+ * Resolve persisted channel aliases to the unified OneBots runtime.
+ *
+ * `wechat` is intentionally kept as a storage/API compatibility alias: old
+ * records do not need a schema migration or a new QR binding. The former
+ * MIO_WECHAT_DRIVER rollout flag is accepted but no longer controls routing.
  */
-export function isOneBotsChannel(channel, env = process.env) {
+export function isOneBotsChannel(channel, _env = process.env) {
   if (!channel) return false
   const driver = String(channel.driver || '').toLowerCase()
   const type = String(channel.type || '').toLowerCase()
   const platform = String(channel.platform || '').toLowerCase()
-  return driver === 'onebots' ||
+  return type === 'wechat' ||
+    driver === 'onebots' ||
     type === 'onebots' ||
     type === 'onebot' ||
     type.startsWith('onebots:') ||
     type.startsWith('onebots-') ||
     platform === 'onebots' ||
-    (type === 'wechat' && String(env.MIO_WECHAT_DRIVER || '').toLowerCase() === 'onebots')
+    platform === ONEBOTS_PLATFORM
 }
 
 /** Protocol settings for an in-process account. */

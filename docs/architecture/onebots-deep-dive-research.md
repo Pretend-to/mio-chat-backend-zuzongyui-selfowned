@@ -10,7 +10,7 @@
 
 ### 1.1 现状与痛点
 MioChat 的 `channels/` 渠道体系旨在让用户可以通过外部 IM 平台（微信、飞书、钉钉、Telegram 等）直接与 MioChat 的 AI 智能体互动。
-目前已基于微信官方 iLink HTTP 协议自主实现了首个渠道（`IlinkClient.js` + `WechatChannel.js`），并规划在 P1 阶段扩展飞书（Lark）与 Telegram。
+迁移前曾基于微信官方 iLink HTTP 协议自主实现首个渠道（`IlinkClient.js` + `WechatChannel.js`）；该实现现已由内嵌 OneBots 接管。
 
 然而，手写各平台私有底层协议存在巨大维护成本：
 1. **协议逆向与频繁变更**：非官方或闭源协议（如微信 iLink）缺少公开稳定文档，存在字段漂移、IDC 节点变更、加解密算法更迭等风险；
@@ -57,8 +57,8 @@ onebots (pnpm monorepo, Node >= 24, TypeScript 5.9)
 3. **协议层 (Protocol Layer)**：将内部的 `CommonEvent` 转换输出为行业标准协议（OneBot V11/V12、Satori 等），并通过 HTTP/WebSocket 供下游业务消费。
 4. **客户端 SDK (`imhelper`)**：提供统一的 Client 封装，应用层代码只需通过 `imhelper` 监听 `message.private`、`message.group` 并调用 `sendMessage`，彻底无需关心底层具体是微信还是飞书。
 
-### 2.2 重点适配器源码对照：`adapter-wechat-clawbot` vs MioChat `IlinkClient.js`
-我们对 OneBots 的 `adapters/adapter-wechat-clawbot/src/sdk` 与 MioChat 自研的 `channels/wechat/IlinkClient.js` 进行了细致比对：
+### 2.2 迁移前适配器源码对照：`adapter-wechat-clawbot` vs MioChat 旧 `IlinkClient.js`
+迁移评估曾对 OneBots 的 `adapters/adapter-wechat-clawbot/src/sdk` 与 MioChat 当时自研的 `channels/wechat/IlinkClient.js` 进行比对：
 
 | 特性维度 | MioChat 现存 `IlinkClient.js` | OneBots `adapter-wechat-clawbot` | 差异与优势评估 |
 | :--- | :--- | :--- | :--- |

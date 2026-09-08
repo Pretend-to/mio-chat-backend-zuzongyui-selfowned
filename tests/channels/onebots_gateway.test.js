@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { BaseApp } from 'onebots'
 import '@onebots/adapter-wechat-clawbot'
 import {
@@ -71,8 +74,8 @@ function makeApp() {
   }
 }
 
-test('OneBots rollout stays explicit and supports the legacy-wechat feature flag', () => {
-  assert.equal(isOneBotsChannel({ type: 'wechat' }, {}), false)
+test('OneBots treats legacy wechat records as a permanent compatibility alias', () => {
+  assert.equal(isOneBotsChannel({ type: 'wechat' }, {}), true)
   assert.equal(isOneBotsChannel({ type: 'onebots' }, {}), true)
   assert.equal(isOneBotsChannel({ type: 'wechat' }, { MIO_WECHAT_DRIVER: 'onebots' }), true)
 })
@@ -175,6 +178,19 @@ test('OneBotsGateway creates a manual in-process client and routes actions/event
   const account = app.adapters.get('wechat-clawbot').accounts.get('channel-2')
   account.protocols[0].emit('dispatch', JSON.stringify({ type: 'meta', detail_type: 'heartbeat' }))
   assert.deepEqual(client.events, [{ type: 'meta', detail_type: 'heartbeat' }])
+  const rawEvent = { message_id: 42, item_list: [{ type: 2 }] }
+  account.protocols[0].emit('dispatch', JSON.stringify({
+    type: 'message',
+    detail_type: 'private',
+    message_id: '42',
+    raw_event: rawEvent,
+    extensions: { wechat_clawbot: { context_token: 'ctx-42' } },
+  }))
+  assert.deepEqual(gateway.getInboundMetadata('channel-2', '42'), {
+    extensions: { wechat_clawbot: { context_token: 'ctx-42' } },
+    platform: undefined,
+    raw_event: rawEvent,
+  })
   assert.equal(client.config.receiveMode, 'manual')
   assert.match(client.config.baseUrl, /^http:\/\/127\.0\.0\.1:/)
   await gateway.stopAccount('channel-2')
@@ -195,5 +211,51 @@ test('background login failures are captured without unhandled rejection', async
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(gateway.getAccountState('channel-3').status, 'error')
   assert.equal(gateway.getAccountState('channel-3').error, 'login failed')
+  await gateway.dispose()
+})
+
+test('OneBotsGateway seeds a legacy credential session without overwriting it', async t => {
+  const sessionDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'onebots-session-'))
+  t.after(() => fs.promises.rm(sessionDataDir, { force: true, recursive: true }))
+  const gateway = new OneBotsGateway({ app: makeApp(), skipRegistration: true, sessionDataDir })
+
+  await gateway.startAccount({
+    id: 'legacy/channel',
+    platform: 'wechat-clawbot',
+    token: 'legacy-token',
+    botId: 'legacy-bot',
+    userId: 'legacy-user',
+    contextTokens: { 'legacy-user': 'legacy-context' },
+  })
+  const filePath = path.join(sessionDataDir, `${encodeURIComponent('legacy/channel')}.json`)
+  assert.deepEqual(JSON.parse(await fs.promises.readFile(filePath, 'utf8')), {
+    token: 'legacy-token',
+    accountId: 'legacy-bot',
+    userId: 'legacy-user',
+    contextTokens: { 'legacy-user': 'legacy-context' },
+  })
+
+  await fs.promises.writeFile(filePath, JSON.stringify({ token: 'new-token' }))
+  await gateway.startAccount({
+    id: 'legacy/channel',
+    platform: 'wechat-clawbot',
+    token: 'stale-token',
+    botId: 'stale-bot',
+    userId: 'stale-user',
+  })
+  assert.deepEqual(JSON.parse(await fs.promises.readFile(filePath, 'utf8')), { token: 'new-token' })
+  await gateway.deleteAccount('legacy/channel')
+  assert.equal(fs.existsSync(filePath), false)
+  await gateway.dispose()
+})
+
+test('OneBotsGateway does not create a legacy session when credentials are incomplete', async t => {
+  const sessionDataDir = path.join(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'onebots-session-')), 'nested')
+  t.after(() => fs.promises.rm(path.dirname(sessionDataDir), { force: true, recursive: true }))
+  const gateway = new OneBotsGateway({ app: makeApp(), skipRegistration: true, sessionDataDir })
+
+  await gateway.startAccount({ id: 'missing-token', platform: 'wechat-clawbot', botId: 'bot' })
+  await gateway.startAccount({ id: 'missing-bot', platform: 'wechat-clawbot', token: 'token' })
+  assert.equal(fs.existsSync(sessionDataDir), false)
   await gateway.dispose()
 })

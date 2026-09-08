@@ -65,7 +65,7 @@ Channel
 | Session 创建、查询、消息持久化 | `lib/chat/persistence/SessionPersistence.js`、`lib/chat/persistence/DatabaseMemoryStore.js` | 子任务创建独立 Session，写入同一 Agent 的持久化空间 |
 | Session 级 FIFO | `channels/common/BaseChannel.js::_enqueueSession()` | 子 Session 使用自己的 `sessionId`，天然与主 Session 隔离 |
 | 用户消息先落盘、assistant 生命周期和流式 Chunk | `channels/common/BaseChannel.js::_processChat()` | 子任务沿用同一套消息一致性和崩溃恢复语义 |
-| LLM 统一调用入口 | `channels/llm.js`、`channels/wechat/llm.js` | 子任务使用同一 LLM service，但传入独立上下文 |
+| LLM 统一调用入口 | `channels/llm.js` | 子任务使用同一 LLM service，但传入独立上下文 |
 | 全局插件实例和工具注册 | `lib/middleware.js`、`lib/plugin.js` | 插件只在进程启动时加载一次，子任务只拿工具快照 |
 | 纯时间任务调度 | `lib/cron.js` | Cron 只负责创建/唤醒 SubAgentRun，不再把复杂工作塞入主 Session |
 | 条件唤醒 | `lib/triggers/` | Sentinel 触发 SubAgentRun 或投递结构化结果，不直接污染主上下文 |

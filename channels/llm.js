@@ -807,7 +807,7 @@ export function createBackendLlm(opts = {}) {
       let crystalPersistenceSucceeded = false
 
       /**
-       * 将累积的完整文本块原样交给渠道，由渠道适配器（如 WechatChannel.splitTextToSegments）
+       * 将累积的完整文本块原样交给渠道，由渠道适配器负责最终发送。
        * 按自身协议（<msg>/<break/>）统一切分，再经伪队列逐条发送。
        */
       const flushTextBlock = async () => {

@@ -101,7 +101,7 @@ channels/
 为了不在升级后立即切换已有微信账号，旧 `type: wechat` 记录默认仍使用自研 iLink 驱动。可通过以下任一方式显式启用 OneBots：
 
 - 新建 `type: onebots` 的渠道（当前默认映射到 `wechat-clawbot`）；
-- 部署时设置 `MIO_WECHAT_DRIVER=onebots`，让现有管理面的 `wechat` 流程无需前端修改即切换到 OneBots。
+- 历史 `type=wechat` 记录会自动映射到 OneBots；`MIO_WECHAT_DRIVER` 仅作为已废弃的兼容环境变量保留，无需再配置。
 
 ### 3.1 OneBotsGateway 规范签名
 ```ts
@@ -216,7 +216,7 @@ export class ChannelRuntime {
 - **阶段二（微信 ClawBot 迁移验证）**：
   - 编写 `OneBotChannel.js` 并对接微信扫码事件流；
   - 跑通真实微信收发 -> 防抖 -> 正在输入打字心跳 -> LLM 回复全链路；
-  - 与现存的自研 `IlinkClient.js` 进行 A/B 对比。
+  - 覆盖旧渠道凭证迁移、二维码登录和 OneBot V12 收发回归。
 - **阶段三（第二渠道开箱——飞书/Telegram）**：
   - 在前端管理面板暴露飞书 / Telegram 配置项；
   - 验证使用同一个 `OneBotChannel` 无缝驱动飞书和 Telegram，彻底宣告通用多渠道体系落成。

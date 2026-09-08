@@ -359,10 +359,7 @@ async function startApp() {
     const channelRuntime = getChannelRuntime()
     try {
       // OneBots 通道需先恢复进程内网关与账号；旧 iLink 通道继续
-      // 由 restoreRunningChannels 处理，两条路径互不重复。
       if (typeof channelRuntime.init === 'function') await channelRuntime.init()
-      const { restoreRunningChannels } = await import('./channels/restoreRunningChannels.js')
-      await restoreRunningChannels(channelRuntime, logger)
     } catch (e) {
       logger.warn('[ChannelRuntime] 自动恢复渠道时出错:', e.message)
     }

@@ -9,9 +9,9 @@
 
 | 里程碑 | 内容 | 测试 |
 |--------|------|------|
-| **M0** | `channels/` 骨架 + PROTOCOL.md（iLink 协议完整参考）+ **IlinkClient 协议层**（登录/长轮询/收发/typing/notify）| 5/5 |
+| **M0** | `channels/` 骨架 + OneBots 嵌入式网关（登录/轮询/收发/typing/notify）| 5/5 |
 | **M1** | **MemoryStore 记忆层**（soul.md / global 长期记忆 / sessions+结晶 / active）| 8/8 |
-| **M2** | **WechatChannel 核心**（长轮询 loop / 单用户 admin / slash 会话路由 / 聚合回复 / typing）| 6 场景 |
+| **M2** | **OneBotChannel 核心**（事件订阅 / 单用户 admin / slash 会话路由 / 聚合回复 / typing）| 6 场景 |
 | **M3** | **灵魂引导**（无 soul → 开放引导 → 提炼 soulDraft → 写 soul.md）| +1 |
 | **E2E** | 真实 HTTP mock iLink + 真组件全链路测试；buildSendMsg 双重 msg 真 bug 修复 | 全 34/34 |
 | **M5** | **保活**（24h 窗口、到期前固定文案提醒、防重复；`meta.last_user_activity`）| ✅ |
@@ -36,7 +36,7 @@
 
 | # | 项 | 内容 |
 |---|----|------|
-| 5 | **渠道抽象固化** | 把 `channels/` 分层（IlinkClient-like 协议层 / Channel 会话层 / Memory 记忆层 / ChannelStore+Runtime 管理层）写成架构文档，作为新渠道模板 |
+| 5 | **渠道抽象固化** | 把 `channels/` 分层（OneBots 协议层 / Channel 会话层 / Memory 记忆层 / ChannelStore+Runtime 管理层）写成架构文档，作为新渠道模板 |
 | 6 | **第二渠道打样** | 提议：飞书 `lark`（官方 openclaw-lark 可参考）或 Telegram——**用同一条抽象跑通第二个渠道**，验证抽象复用而非重写 |
 | 7 | **管理面增强** | 多账号；保活状态/到期倒计时展示；二维码有效期 UI；运行时失败重试状态 |
 

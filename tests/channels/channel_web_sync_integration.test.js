@@ -7,7 +7,7 @@ import fs from 'node:fs'
 global.logger = global.logger || console
 
 import { MemoryStore } from '../../channels/memory/index.js'
-import { WechatChannel } from '../../channels/wechat/WechatChannel.js'
+import { OneBotChannel } from '../../channels/onebots/OneBotChannel.js'
 import sessions from '../../lib/server/socket.io/services/sessions.js'
 
 const MASTER = 'master@im.wechat'
@@ -15,15 +15,24 @@ const MASTER = 'master@im.wechat'
 function createMockClient() {
   const sent = []
   return {
+    platform: 'wechat-clawbot',
     botId: 'bot-1',
-    downloadMedia: async () => Buffer.from('fake'),
-    getUpdates: async () => ({ msgs: [], ret: 0 }),
-    sendMessage: async (payload) => {
-      sent.push(payload)
-      return { ret: 0 }
+    sendPrivateMessage: async (userId, message) => {
+      sent.push({ scene_type: 'private', scene_id: userId, message })
+      return { status: 'ok' }
     },
     sent,
   }
+}
+
+async function waitForAgentMeta(memory, key, expected) {
+  let actual = null
+  for (let attempt = 0; attempt < 50; attempt++) {
+    actual = await memory.getAgentMeta(key, null)
+    if (actual === expected) return actual
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  return actual
 }
 
 test('集成测试 1：渠道用户消息入站与 LLM 流式推流实时广播至 Web 客户端', async () => {
@@ -44,13 +53,14 @@ test('集成测试 1：渠道用户消息入站与 LLM 流式推流实时广播�
     },
   }
 
-  const chn = new WechatChannel({
+  const chn = new OneBotChannel({
     channelId,
     client,
     id: channelId,
     llm: mockLlm,
     masterId: MASTER,
     memory,
+    keepAlive: { enabled: false },
     typing: false,
   })
 
@@ -77,13 +87,14 @@ test('集成测试 1：渠道用户消息入站与 LLM 流式推流实时广播�
   sessions.addSession(mockWebClient)
 
   try {
-    // 微信入站一条用户消息
+    // OneBot V12 private message event (微信 ClawBot adapter)
     const incomingMsg = {
+      type: 'message',
+      detail_type: 'private',
       context_token: 'CTX_TOKEN_ABC',
-      from_user_id: MASTER,
-      item_list: [{ text: '老哥欠桐乃一杯奶茶', type: 1 }],
-      message_id: 101,
-      message_type: 1,
+      user_id: MASTER,
+      message: [{ type: 'text', data: { text: '老哥欠桐乃一杯奶茶' } }],
+      message_id: '101',
     }
 
     await chn.handleIncomingMessage(incomingMsg)
@@ -96,12 +107,15 @@ test('集成测试 1：渠道用户消息入站与 LLM 流式推流实时广播�
     assert.strictEqual(userBroadcast.data.userMessage.text, '老哥欠桐乃一杯奶茶')
     assert.ok(userBroadcast.data.assistantMessageId, '必须生成配对的 assistantMessageId 占位')
 
-    // 验证 2：微信端是否收到 bot 回复
-    assert.strictEqual(client.sent.length, 1, '微信端应发出 1 条消息')
-    assert.strictEqual(client.sent[0].context_token, 'CTX_TOKEN_ABC', '微信回复应带回 context_token')
+    // 验证 2：OneBot V12 typed SDK 是否收到 bot 回复
+    assert.strictEqual(client.sent.length, 1, 'OneBot 私聊端应发出 1 条消息')
+    assert.strictEqual(client.sent[0].scene_type, 'private')
+    assert.strictEqual(client.sent[0].scene_id, MASTER)
+    assert.strictEqual(client.sent[0].message[0].type, 'text')
+    assert.ok(client.sent[0].message[0].data.text.includes('你好，收到你的微信消息啦！'))
 
     // 验证 3：contextToken 持久化
-    const savedToken = await memory.getAgentMeta('latestContextToken', null)
+    const savedToken = await waitForAgentMeta(memory, 'latestContextToken', 'CTX_TOKEN_ABC')
     assert.strictEqual(savedToken, 'CTX_TOKEN_ABC', 'contextToken 必须成功持久化到 MemoryStore')
   } catch (err) {
     console.error('TEST 1 ERROR:', err)
@@ -119,13 +133,14 @@ test('集成测试 2：高危操作/全局记忆审批挂起与微信端【确�
   const client = createMockClient()
   const channelId = 'ch_approval_200'
 
-  const chn = new WechatChannel({
+  const chn = new OneBotChannel({
     channelId,
     client,
     id: channelId,
     llm: { process: async () => ({ text: 'ok' }) },
     masterId: MASTER,
     memory,
+    keepAlive: { enabled: false },
     typing: false,
   })
 
@@ -141,20 +156,21 @@ test('集成测试 2：高危操作/全局记忆审批挂起与微信端【确�
 
     await new Promise(r => setTimeout(r, 50))
 
-    // 验证微信端是否收到格式化的审批卡片
-    assert.strictEqual(client.sent.length, 1, '应向微信推送审批卡片')
-    const cardText = client.sent[0].item_list[0].text
+    // 验证 OneBot V12 微信端是否收到格式化的审批卡片
+    assert.strictEqual(client.sent.length, 1, '应向 OneBot 私聊端推送审批卡片')
+    const cardText = client.sent[0].message[0].data.text
     assert.ok(cardText.includes('全局长期记忆更新审批'), '卡片应包含标题')
     assert.ok(cardText.includes('【奶茶债务】老哥欠桐乃奶茶一杯'), '卡片应包含具体的记忆内容')
     assert.ok(cardText.includes('回复【确认】'), '卡片应包含确认提示')
 
-    // 2. 模拟用户在微信端回复「确认」
+    // 2. 模拟用户在 OneBot V12 微信端回复「确认」
     const confirmMsg = {
+      type: 'message',
+      detail_type: 'private',
       context_token: 'CTX_TOKEN_FRESH_REPLY',
-      from_user_id: MASTER,
-      item_list: [{ text: '确认', type: 1 }],
-      message_id: 102,
-      message_type: 1,
+      user_id: MASTER,
+      message: [{ type: 'text', data: { text: '确认' } }],
+      message_id: '102',
     }
 
     await chn.handleIncomingMessage(confirmMsg)
@@ -163,14 +179,13 @@ test('集成测试 2：高危操作/全局记忆审批挂起与微信端【确�
     const result = await confirmPromise
     assert.strictEqual(result.approved, true, '确认指令应成功通过审批')
 
-    // 验证系统回显是否立刻下发到微信
+    // 验证系统回显是否立刻下发到 OneBot V12 微信端
     assert.strictEqual(client.sent.length, 2, '应发出系统确认回显')
-    const echoText = client.sent[1].item_list[0].text
+    const echoText = client.sent[1].message[0].data.text
     assert.ok(echoText.includes('已确认授权，正在继续执行'), '必须包含系统确认回显文案')
-    assert.strictEqual(client.sent[1].context_token, 'CTX_TOKEN_FRESH_REPLY', '回显必须使用最新回复的 contextToken')
 
     // 验证最新 token 是否持久化
-    const savedToken = await memory.getAgentMeta('latestContextToken', null)
+    const savedToken = await waitForAgentMeta(memory, 'latestContextToken', 'CTX_TOKEN_FRESH_REPLY')
     assert.strictEqual(savedToken, 'CTX_TOKEN_FRESH_REPLY', '确认回复带来的最新 token 必须持久化')
   } catch (err) {
     console.error('TEST 2 ERROR:', err)
@@ -184,13 +199,14 @@ test('集成测试 3：不可记住的 Shell 审批在渠道端展示完整命�
   const baseDir = path.join(os.tmpdir(), `mio-approval-command-test-${Date.now()}_${Math.random().toString(36).slice(2, 7)}`)
   const memory = new MemoryStore({ agentId: 'ch_approval_300', baseDir })
   const client = createMockClient()
-  const chn = new WechatChannel({
+  const chn = new OneBotChannel({
     channelId: 'ch_approval_300',
     client,
     id: 'ch_approval_300',
     llm: { process: async () => ({ text: 'ok' }) },
     masterId: MASTER,
     memory,
+    keepAlive: { enabled: false },
     typing: false,
   })
 
@@ -204,17 +220,18 @@ test('集成测试 3：不可记住的 Shell 审批在渠道端展示完整命�
     }, { from: MASTER, contextToken: 'CTX_COMMAND' })
 
     await new Promise(resolve => setTimeout(resolve, 20))
-    const cardText = client.sent[0].item_list[0].text
+    const cardText = client.sent[0].message[0].data.text
     assert.ok(cardText.includes('rm -rf /tmp/important'))
     assert.ok(cardText.includes('回复【确认】'))
     assert.doesNotMatch(cardText, /执行并记住/)
 
     await chn.handleIncomingMessage({
+      type: 'message',
+      detail_type: 'private',
       context_token: 'CTX_COMMAND_REPLY',
-      from_user_id: MASTER,
-      item_list: [{ text: '确认', type: 1 }],
-      message_id: 103,
-      message_type: 1,
+      user_id: MASTER,
+      message: [{ type: 'text', data: { text: '确认' } }],
+      message_id: '103',
     })
     assert.equal((await pending).approved, true)
   } finally {
@@ -304,7 +321,7 @@ test('集成测试 4：Web 端主动发消息，工具调用+文本流+完成帧
     },
   }
 
-  const chn = new WechatChannel({
+  const chn = new OneBotChannel({
     channelId,
     client: createMockClient(),
     id: channelId,
@@ -368,10 +385,8 @@ test('集成测试 5：Web 端连续发送消息触发批处理合并 (Batch Mer
 
   sessions.addSession(mockWebClient)
 
-  let chatCalls = 0
   const mockLlm = {
     process: async (ctx) => {
-      chatCalls++
       await new Promise(r => setTimeout(r, 80))
       // 模拟底层 LLM 完成时发送当前活跃任务的 complete 帧
       if (ctx.messageId) {
@@ -387,7 +402,7 @@ test('集成测试 5：Web 端连续发送消息触发批处理合并 (Batch Mer
     },
   }
 
-  const chn = new WechatChannel({
+  const chn = new OneBotChannel({
     channelId,
     client: createMockClient(),
     id: channelId,
@@ -443,4 +458,3 @@ test('集成测试 5：Web 端连续发送消息触发批处理合并 (Batch Mer
     fs.rmSync(baseDir, { force: true, recursive: true })
   }
 })
-

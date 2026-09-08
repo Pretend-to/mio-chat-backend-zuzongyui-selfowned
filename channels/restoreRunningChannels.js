@@ -1,8 +1,15 @@
+import { isOneBotsChannel } from './onebots/config.js'
+
 /** Restore channels from the configured authoritative ChannelStore. */
 export async function restoreRunningChannels(channelRuntime, logger = console) {
   const allChannels = await channelRuntime.channelStore.listInternal()
+  const supports = channel => typeof channelRuntime.isOneBotsChannel === 'function'
+    ? channelRuntime.isOneBotsChannel(channel)
+    : isOneBotsChannel(channel)
   const toRestore = allChannels.filter(channel => (
-    channel.status === 'running' && channel.token && channel.userId
+    channel.status === 'running' &&
+    supports(channel) &&
+    (channel.userId || channel.botId)
   ))
 
   if (toRestore.length > 0) {
@@ -10,7 +17,12 @@ export async function restoreRunningChannels(channelRuntime, logger = console) {
   }
   for (const channel of toRestore) {
     try {
-      await channelRuntime.start(channel.id)
+      if (
+        typeof channelRuntime.isRunning !== 'function' ||
+        !channelRuntime.isRunning(channel.id)
+      ) {
+        await channelRuntime.start(channel.id)
+      }
       logger.info?.(`[ChannelRuntime] 渠道 "${channel.name}" (${channel.id}) 已恢复运行`)
     } catch (error) {
       logger.warn?.(`[ChannelRuntime] 渠道 "${channel.name}" (${channel.id}) 恢复失败: ${error.message}`)

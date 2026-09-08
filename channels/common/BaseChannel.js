@@ -498,18 +498,37 @@ export class BaseChannel {
       packet.immediate ||
       isSlash
     ) {
+      let images = packet.images || []
+      let files = packet.files || []
+      if (packet.pendingMediaPromise) {
+        try {
+          const media = await packet.pendingMediaPromise
+          images = [...images, ...(media?.images || [])]
+          files = [...files, ...(media?.files || [])]
+        } catch (err) {
+          this.log?.warn?.(
+            `[${this.channelType}] 媒体异步下载转存异常:`,
+            err.message,
+          )
+        }
+      }
+      let text = packet.text || ''
+      if (files.length > 0) {
+        const fileLinks = files.map((file) => `[文件: ${file.name}](${file.url})`).join('\n')
+        text = text && !text.startsWith('[文件:') ? `${text}\n${fileLinks}` : fileLinks
+      }
       const activeSid = sid || (await this.memory?.getActiveSession?.())
       const ctx = {
         contextToken: packet.contextToken || this.latestContextToken || null,
-        files: packet.files || [],
+        files,
         from: from || this.masterId,
-        images: packet.images || [],
+        images: [...new Set(images)],
         rawMsg: packet.rawMsg || null,
         sid: activeSid,
-        text: packet.text || '',
+        text,
         ...packet.ctx,
       }
-      return this._route(packet.text || '', ctx)
+      return this._route(text, ctx)
     }
 
     if (!this._inboundDebounceBuffers) {
