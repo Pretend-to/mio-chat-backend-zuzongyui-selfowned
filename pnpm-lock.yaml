@@ -31,7 +31,7 @@ overrides:
 
 patchedDependencies:
   '@onebots/adapter-wechat-clawbot@3.0.12':
-    hash: 63dd7eedadcf187450ead2d35990e05eb42a7789e85b2fec52fc08948fe80f69
+    hash: 6ac311190a8a3889e99d3d38d7061f7158d0d31948f8c79c2c7967c0692c7b36
     path: patches/@onebots__adapter-wechat-clawbot@3.0.12.patch
 
 importers:
@@ -55,7 +55,7 @@ importers:
         version: 1.29.0(zod@4.4.3)
       '@onebots/adapter-wechat-clawbot':
         specifier: 3.0.12
-        version: 3.0.12(patch_hash=63dd7eedadcf187450ead2d35990e05eb42a7789e85b2fec52fc08948fe80f69)(onebots@1.2.12(@types/react@19.2.14))
+        version: 3.0.12(patch_hash=6ac311190a8a3889e99d3d38d7061f7158d0d31948f8c79c2c7967c0692c7b36)(onebots@1.2.12(@types/react@19.2.14))
       '@onebots/protocol-onebot-v12':
         specifier: 3.0.12
         version: 3.0.12(onebots@1.2.12(@types/react@19.2.14))
@@ -6611,7 +6611,7 @@ snapshots:
 
   '@noble/hashes@1.8.0': {}
 
-  '@onebots/adapter-wechat-clawbot@3.0.12(patch_hash=63dd7eedadcf187450ead2d35990e05eb42a7789e85b2fec52fc08948fe80f69)(onebots@1.2.12(@types/react@19.2.14))':
+  '@onebots/adapter-wechat-clawbot@3.0.12(patch_hash=6ac311190a8a3889e99d3d38d7061f7158d0d31948f8c79c2c7967c0692c7b36)(onebots@1.2.12(@types/react@19.2.14))':
     dependencies:
       onebots: 1.2.12(@types/react@19.2.14)
 

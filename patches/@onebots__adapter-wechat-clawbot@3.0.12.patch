@@ -71,6 +71,30 @@ index 29f0eb08f38b49306f36629c55baa3e55c112d35..3b265255c2a2211ec2e099147b23273d
      qr_login_timeout_ms: {
          type: "number",
          default: 480000,
+diff --git a/lib/sdk/cdn/payload-pipeline.d.ts b/lib/sdk/cdn/payload-pipeline.d.ts
+index 0c7871beb7d62d5e648dc0e8892734a496c4248a..41226d8f954483914f557b3b9bd705ddb8aef8c3 100644
+--- a/lib/sdk/cdn/payload-pipeline.d.ts
++++ b/lib/sdk/cdn/payload-pipeline.d.ts
+@@ -6,6 +6,7 @@ export interface StagedCipherPayload {
+     slotKey: string;
+     remoteHandle: string;
+     aesKeyHex: string;
++    plainMd5Hex: string;
+     plainBytes: number;
+     cipherBudget: number;
+     originalName: string;
+diff --git a/lib/sdk/cdn/payload-pipeline.js b/lib/sdk/cdn/payload-pipeline.js
+index 8e327ea5897251b236ac722b7c9f9b0673ff76ee..c188b139ddb9fa46fa37864cd81c15e26fd3f649 100644
+--- a/lib/sdk/cdn/payload-pipeline.js
++++ b/lib/sdk/cdn/payload-pipeline.js
+@@ -85,6 +85,7 @@ export async function stageBinaryForPeer(params) {
+         slotKey,
+         remoteHandle,
+         aesKeyHex: key16.toString("hex"),
++        plainMd5Hex: md5hex,
+         plainBytes: plainLen,
+         cipherBudget: padded,
+         originalName: blob.fileName,
 diff --git a/lib/sdk/ilink-bot.d.ts b/lib/sdk/ilink-bot.d.ts
 index d8bf3cabd2a5a96caae1b90e95021d9b247888b2..a42405e3ac8e7ecf7dadae26e6bbdc415ddfe1ac 100644
 --- a/lib/sdk/ilink-bot.d.ts
@@ -242,16 +266,22 @@ index 4acbd6ca05149bbf72c6b871efc6b90546cbaa78..dba5ce7c212fdf794db39b6092cf2461
 +};
  //# sourceMappingURL=assembler.d.ts.map
 diff --git a/lib/sdk/outbound/assembler.js b/lib/sdk/outbound/assembler.js
-index ed65dce606acb36e2be55e9558c42edaf30b57f9..1b887f829ae060fbf5cd689ce0933b7f67fe6800 100644
+index ed65dce606acb36e2be55e9558c42edaf30b57f9..ffe1dc3c348569a531f2059098774355aaed5692 100644
 --- a/lib/sdk/outbound/assembler.js
 +++ b/lib/sdk/outbound/assembler.js
-@@ -1,4 +1,4 @@
+@@ -1,6 +1,10 @@
 -import { coercePlainMarkdown } from "../internal/markdown-lite.js";
 +import { formatOutboundText } from "../internal/markdown-lite.js";
  import { nextOutboundClientMarker } from "../internal/random-tags.js";
  import { AuthorKind, ItemKind, OutboxPhase } from "../protocol/wire-models.js";
++/** iLink 线协议要求 Base64 的内容是 32 位 hex 文本，而不是 16 字节原始密钥。 */
++function encodeCdnAesKey(aesKeyHex) {
++    return Buffer.from(aesKeyHex, "utf8").toString("base64");
++}
  async function emitIsolatedFacet(transport, peerKey, contextToken, facet) {
-@@ -24,8 +24,8 @@ async function emitFacetChain(transport, peerKey, contextToken, facets) {
+     const clientId = nextOutboundClientMarker();
+     const envelope = {
+@@ -24,8 +28,8 @@ async function emitFacetChain(transport, peerKey, contextToken, facets) {
      }
      return last;
  }
@@ -262,7 +292,7 @@ index ed65dce606acb36e2be55e9558c42edaf30b57f9..1b887f829ae060fbf5cd689ce0933b7f
      return {
          msg: {
              from_user_id: "",
-@@ -33,20 +33,25 @@ export function packLiteralReply(peerKey, contextToken, markdown) {
+@@ -33,69 +37,91 @@ export function packLiteralReply(peerKey, contextToken, markdown) {
              client_id: nextOutboundClientMarker(),
              message_type: AuthorKind.Bot,
              message_state: OutboxPhase.Settled,
@@ -293,7 +323,16 @@ index ed65dce606acb36e2be55e9558c42edaf30b57f9..1b887f829ae060fbf5cd689ce0933b7f
      }
      chain.push({
          type: ItemKind.Image,
-@@ -61,10 +66,13 @@ export async function postPhotoBundle(transport, peerKey, contextToken, staged,
+         image_item: {
+             media: {
+                 encrypt_query_param: staged.remoteHandle,
+-                aes_key: Buffer.from(staged.aesKeyHex, "hex").toString("base64"),
++                aes_key: encodeCdnAesKey(staged.aesKeyHex),
+                 encrypt_type: 1,
+             },
++            hd_size: staged.cipherBudget,
+             mid_size: staged.cipherBudget,
+         },
      });
      return emitFacetChain(transport, peerKey, contextToken, chain);
  }
@@ -309,7 +348,16 @@ index ed65dce606acb36e2be55e9558c42edaf30b57f9..1b887f829ae060fbf5cd689ce0933b7f
      }
      chain.push({
          type: ItemKind.Video,
-@@ -79,10 +87,13 @@ export async function postVideoBundle(transport, peerKey, contextToken, staged,
+         video_item: {
+             media: {
+                 encrypt_query_param: staged.remoteHandle,
+-                aes_key: Buffer.from(staged.aesKeyHex, "hex").toString("base64"),
++                aes_key: encodeCdnAesKey(staged.aesKeyHex),
+                 encrypt_type: 1,
+             },
+-            video_size: staged.cipherBudget,
++            video_size: staged.plainBytes,
+         },
      });
      return emitFacetChain(transport, peerKey, contextToken, chain);
  }
@@ -325,7 +373,17 @@ index ed65dce606acb36e2be55e9558c42edaf30b57f9..1b887f829ae060fbf5cd689ce0933b7f
      }
      chain.push({
          type: ItemKind.File,
-@@ -98,4 +109,13 @@ export async function postFileBundle(transport, peerKey, contextToken, staged, c
+         file_item: {
+             media: {
+                 encrypt_query_param: staged.remoteHandle,
+-                aes_key: Buffer.from(staged.aesKeyHex, "hex").toString("base64"),
++                aes_key: encodeCdnAesKey(staged.aesKeyHex),
+                 encrypt_type: 1,
+             },
+             file_name: staged.originalName,
+             len: String(staged.plainBytes),
++            md5: staged.plainMd5Hex,
+         },
      });
      return emitFacetChain(transport, peerKey, contextToken, chain);
  }
