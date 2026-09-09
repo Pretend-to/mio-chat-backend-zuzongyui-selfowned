@@ -1,4 +1,4 @@
-import { isOneBotsChannel } from './onebots/config.js'
+import { isOneBotsChannel } from './ChannelAdapterRegistry.js'
 
 /** Restore channels from the configured authoritative ChannelStore. */
 export async function restoreRunningChannels(channelRuntime, logger = console) {

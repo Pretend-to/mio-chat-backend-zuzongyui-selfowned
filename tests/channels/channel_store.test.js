@@ -9,12 +9,14 @@ test('ChannelStore 渠道配置持久化', async () => {
   const file = path.join(os.tmpdir(), `channels-${Date.now()}.json`)
   const store = new ChannelStore({ file })
 
-  await test('默认字段：OneBots runtime + 微信兼容平台，token 不明文返回', async () => {
+  await test('默认字段保持平台无关，token 不明文返回', async () => {
     const c = await store.create({ name: '我的微信' })
-    assert.strictEqual(c.agentId, 'wechat-master')
-    assert.strictEqual(c.type, 'onebots')
-    assert.strictEqual(c.platform, 'wechat-clawbot')
-    assert.strictEqual(c.protocol, 'onebot.v12')
+    assert.strictEqual(c.agentId, 'channel-master')
+    assert.strictEqual(c.type, 'channel')
+    assert.strictEqual(c.adapterId, '')
+    assert.strictEqual(c.driver, '')
+    assert.strictEqual(c.platform, '')
+    assert.strictEqual(c.protocol, '')
     assert.strictEqual(c.status, 'unbound')
     assert.ok(c.hasToken === false, '无 token 时 hasToken=false')
     assert.ok(!('token' in c), '对外不返回 token 明文')
@@ -29,6 +31,19 @@ test('ChannelStore 渠道配置持久化', async () => {
     assert.ok(!('token' in pub) && pub.hasToken === true, '对外脱敏 + hasToken=true')
     const list = await store.list()
     assert.ok(list.every((x) => !('token' in x)), 'list 全部脱敏')
+  })
+
+  await test('旧式直接创建的已绑定微信记录补齐适配器身份', async () => {
+    const c = await store.create({
+      name: '旧微信',
+      token: 'legacy-token',
+      userId: 'legacy-user',
+    })
+    assert.strictEqual(c.type, 'weixin-ilink')
+    assert.strictEqual(c.adapterId, 'weixin-ilink')
+    assert.strictEqual(c.driver, 'onebots')
+    assert.strictEqual(c.platform, 'wechat-clawbot')
+    assert.strictEqual(c.protocol, 'onebot.v12')
   })
 
   await test('remove 删除', async () => {

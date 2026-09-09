@@ -1,6 +1,10 @@
 import { createSessionPersistence } from '../lib/chat/persistence/createSessionPersistence.js'
 import { createBackendLlm } from './llm.js'
-import { isOneBotsChannel, resolveOneBotsPlatform } from './onebots/config.js'
+import {
+  isOneBotsChannel,
+  resolveChannelAdapter,
+  resolveOneBotsPlatform,
+} from './ChannelAdapterRegistry.js'
 import logger from '../utils/logger.js'
 
 /**
@@ -139,6 +143,7 @@ export class ChannelRuntime {
   async start(channelId) {
     const channel = await this.channelStore.get(channelId)
     if (!channel) throw new Error(`channel ${channelId} not found`)
+    const adapterDefinition = resolveChannelAdapter(channel)
     const onebots = this.isOneBotsChannel(channel)
     if (!onebots) throw new Error(`channel type is not supported by OneBots: ${channel.type || 'unknown'}`)
     if (!channel.userId && !channel.botId) {
@@ -146,8 +151,9 @@ export class ChannelRuntime {
     }
     if (this.running.has(channelId)) return this.running.get(channelId).chn
 
-    const agentId = channel.agentId || 'wechat-master'
+    const agentId = channel.agentId || adapterDefinition?.defaults?.agentId || 'channel-master'
     const platform = resolveOneBotsPlatform(channel)
+    if (!platform) throw new Error(`channel adapter has no OneBots platform: ${channel.type || 'unknown'}`)
     this.logger.info?.(`[ChannelRuntime] 🚀 正在启动渠道 "${channelId}" (type=${channel.type}, platform=${platform}, masterId=${channel.userId || channel.botId})`)
     const memory = await this.createMemory(agentId, { recover: true })
     let client
@@ -158,7 +164,7 @@ export class ChannelRuntime {
       const accountConfig = latestContextToken && channel.userId
         ? { ...channel, contextTokens: { [channel.userId]: latestContextToken } }
         : channel
-      await gateway.startAccount(accountConfig)
+      await gateway.startAccount(accountConfig, adapterDefinition)
       if (typeof gateway.createClient !== 'function') {
         throw new Error('OneBots gateway does not provide createClient(channel)')
       }
@@ -180,9 +186,11 @@ export class ChannelRuntime {
           this.channelStore.update(channelId, { lastActive: Date.now() }).catch(() => {})
         },
       }
-      const factory = await this.getOnebotChannelFactory()
+      const factory = this.onebotChannelFactory || adapterDefinition?.createChannel ||
+        await this.getOnebotChannelFactory()
       const chn = await factory({
         ...commonOptions,
+        adapterDefinition,
         channel,
         gateway,
         platform,

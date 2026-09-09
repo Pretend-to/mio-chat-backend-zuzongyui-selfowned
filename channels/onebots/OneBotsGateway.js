@@ -2,55 +2,16 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import {
-  ONEBOTS_PLATFORM,
   ONEBOTS_PORT,
   ONEBOTS_RECEIVE_MODE,
   ONEBOTS_PROTOCOL,
   createLoopbackUrl,
   createProtocolConfig,
 } from './config.js'
-import { getPlatformDefinition } from './platformCatalog.js'
 import defaultLogger from '../../utils/logger.js'
-
-const noopLogger = {
-  debug() {},
-  info() {},
-  warn() {},
-  error() {},
-}
 
 const asError = value => value instanceof Error ? value : new Error(String(value))
 const INBOUND_METADATA_MAX_SIZE = 256
-
-function nonEmptyString(value) {
-  return typeof value === 'string' && value.trim() ? value.trim() : null
-}
-
-function normalizeContextTokens(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([peerId, token]) => nonEmptyString(peerId) && nonEmptyString(token))
-      .map(([peerId, token]) => [String(peerId), String(token).trim()]),
-  )
-}
-
-/**
- * OneBots 3.0.12 rejects `group_id: null`/`""` before its mapper can apply
- * the documented private-message fallback. Real iLink private events use
- * both shapes, so treat only blank group ids as absent at the adapter edge.
- */
-export function normalizeIlinkInboundPacket(packet) {
-  if (!packet || typeof packet !== 'object' || !Object.hasOwn(packet, 'group_id')) {
-    return packet
-  }
-  if (packet.group_id !== null && !(typeof packet.group_id === 'string' && !packet.group_id.trim())) {
-    return packet
-  }
-  const normalized = { ...packet }
-  delete normalized.group_id
-  return normalized
-}
 
 /**
  * Small, process-local facade around OneBots BaseApp.
@@ -67,11 +28,6 @@ export class OneBotsGateway {
     this.appFactory = options.appFactory ?? null
     this.clientFactory = options.clientFactory ?? null
     this.logger = options.logger ?? defaultLogger
-    // The ClawBot adapter uses process.cwd()/data/wechat-clawbot by default.
-    // Keep this injectable so migration tests never touch the real session dir.
-    this.sessionDataDir = path.resolve(
-      options.sessionDataDir ?? path.join(process.cwd(), 'data', 'wechat-clawbot'),
-    )
     this.accounts = new Map()
     this.qrSessions = new Map()
     this.initialized = false
@@ -128,10 +84,12 @@ export class OneBotsGateway {
     }
   }
 
-  normalizeChannelConfig(channelConfig = {}) {
+  normalizeChannelConfig(channelConfig = {}, adapterDefinition = null) {
     const id = String(channelConfig.id ?? channelConfig.account_id ?? '').trim()
     if (!id) throw new TypeError('OneBots account requires a non-empty id')
-    const platform = String(channelConfig.platform ?? ONEBOTS_PLATFORM).trim()
+    const platform = String(
+      adapterDefinition?.onebots?.platform ?? channelConfig.platform ?? '',
+    ).trim()
     if (!platform) throw new TypeError('OneBots account requires a platform')
     const credentials = channelConfig.credentials && typeof channelConfig.credentials === 'object'
       ? channelConfig.credentials
@@ -144,27 +102,23 @@ export class OneBotsGateway {
     }
     const protocol = channelConfig[protocolName] ?? channelConfig.protocolConfig ??
       (channelConfig.protocol && typeof channelConfig.protocol === 'object' ? channelConfig.protocol : {})
-    return {
+    const normalized = {
       ...credentials,
       ...channelConfig.config,
       platform,
       account_id: id,
-      ...(platform === 'wechat-clawbot' && {
-        outbound_text_format: channelConfig.config?.outbound_text_format
-          ?? credentials.outbound_text_format
-          ?? 'markdown',
-      }),
       [protocolName]: createProtocolConfig(protocol),
     }
+    return adapterDefinition?.onebots?.bridge?.configureAccount?.(channelConfig, normalized) ?? normalized
   }
 
-  async ensurePlatformAdapter(platform) {
+  async ensurePlatformAdapter(platform, adapterDefinition = null) {
     if (this.app.adapters?.get?.(platform)) return
     if (!/^[a-z0-9][a-z0-9-]*$/.test(platform)) {
       throw new TypeError(`Invalid OneBots platform: ${platform}`)
     }
     const loader = this.options.adapterLoaders?.[platform]
-    const packageName = getPlatformDefinition(platform)?.package ?? `@onebots/adapter-${platform}`
+    const packageName = adapterDefinition?.onebots?.package ?? `@onebots/adapter-${platform}`
     try {
       if (loader) await loader()
       else await import(packageName)
@@ -173,65 +127,15 @@ export class OneBotsGateway {
     }
   }
 
-  /**
-   * Seed the adapter's native session file from a legacy ChannelStore record.
-   * The adapter deliberately does not read token/botId from account config, so
-   * this bridge is needed for existing installations. Exclusive creation is
-   * important: a newer QR login must never be replaced by stale legacy data.
-   */
-  async seedLegacySession(channelConfig, accountId = null) {
-    const token = nonEmptyString(channelConfig?.token)
-    const botId = nonEmptyString(channelConfig?.botId ?? channelConfig?.bot_id)
-    if (!token || !botId) return false
-
-    const id = String(accountId ?? channelConfig?.id ?? channelConfig?.account_id ?? '').trim()
-    if (!id) return false
-    const filePath = path.join(this.sessionDataDir, `${encodeURIComponent(id)}.json`)
-    const session = {
-      token,
-      accountId: botId,
-      ...(nonEmptyString(channelConfig?.userId ?? channelConfig?.user_id)
-        ? { userId: nonEmptyString(channelConfig?.userId ?? channelConfig?.user_id) }
-        : {}),
-      contextTokens: normalizeContextTokens(channelConfig?.contextTokens),
-    }
-
-    await fs.promises.mkdir(this.sessionDataDir, { recursive: true, mode: 0o700 })
-    let handle = null
-    let created = false
-    try {
-      handle = await fs.promises.open(filePath, 'wx', 0o600)
-      created = true
-      await handle.writeFile(`${JSON.stringify(session, null, 2)}\n`, 'utf8')
-      await handle.sync()
-      return true
-    } catch (error) {
-      if (error?.code === 'EEXIST') return false
-      if (created) await fs.promises.unlink(filePath).catch(() => {})
-      throw error
-    } finally {
-      await handle?.close().catch(() => {})
-    }
-  }
-
   findProtocol(account) {
     return account?.protocols?.find(protocol => `${protocol.name}.${protocol.version}` === ONEBOTS_PROTOCOL)
       ?? account?.protocols?.[0]
   }
 
-  installInboundCompatibility(state) {
-    const client = state.account?.client
-    if (state.platform !== 'wechat-clawbot' || typeof client?.ingest !== 'function') return
-    state.restoreInboundCompatibility?.()
-    const original = client.ingest
-    const wrapped = function (packet, ...args) {
-      return Reflect.apply(original, this, [normalizeIlinkInboundPacket(packet), ...args])
-    }
-    client.ingest = wrapped
-    state.restoreInboundCompatibility = () => {
-      if (client.ingest === wrapped) client.ingest = original
-      state.restoreInboundCompatibility = null
-    }
+  installPlatformCompatibility(state) {
+    state.restorePlatformCompatibility?.()
+    state.restorePlatformCompatibility = state.adapterDefinition?.onebots?.bridge
+      ?.installCompatibility?.({ state, gateway: this }) ?? null
   }
 
   attachAccountEvents(state) {
@@ -262,7 +166,7 @@ export class OneBotsGateway {
       }
       if (state.qr) state.qr = { ...state.qr, status: 'online' }
       this.qrSessions.delete(id)
-      this.logger.info?.(`[OneBots] 账号 ${id} iLink 会话已就绪并上线: botId=${state.session?.accountId}, userId=${state.session?.userId}`)
+      this.logger.info?.(`[OneBots] 账号 ${id} 已就绪并上线: botId=${state.session?.accountId}, userId=${state.session?.userId}`)
     }
     const onCredentialStale = error => {
       state.status = 'credential_stale'
@@ -281,8 +185,7 @@ export class OneBotsGateway {
       this.logger.info?.(`[OneBots] 账号 ${id} 已停止下线`)
     }
 
-    // The real adapter emits these on its iLink client. Supporting account
-    // events too keeps the facade usable with alternative adapters and mocks.
+    // Adapters may emit lifecycle events on their client or account object.
     for (const target of [client, account]) {
       if (!target?.on) continue
       target.on('qr', onQr)
@@ -305,12 +208,16 @@ export class OneBotsGateway {
     }
   }
 
-  async startAccount(channelConfig) {
+  async startAccount(channelConfig, adapterDefinition = null) {
     await this.init()
     if (this.disposed) throw new Error('OneBotsGateway has been disposed')
-    const normalized = this.normalizeChannelConfig(channelConfig)
+    const normalized = this.normalizeChannelConfig(channelConfig, adapterDefinition)
     const id = normalized.account_id
-    await this.seedLegacySession(channelConfig, id)
+    await adapterDefinition?.onebots?.bridge?.beforeAccountStart?.({
+      accountId: id,
+      channelConfig,
+      gateway: this,
+    })
     const existing = this.accounts.get(id)
     if (existing) {
       if (existing.platform !== normalized.platform) {
@@ -322,7 +229,7 @@ export class OneBotsGateway {
       }
     }
 
-    await this.ensurePlatformAdapter(normalized.platform)
+    await this.ensurePlatformAdapter(normalized.platform, adapterDefinition)
     const adapter = this.app.adapters?.get?.(normalized.platform)
       ?? this.app.findOrCreateAdapter?.(normalized.platform)
     if (!adapter) throw new Error(`OneBots adapter unavailable: ${normalized.platform}`)
@@ -355,11 +262,12 @@ export class OneBotsGateway {
       error: null,
       status: 'pending',
     }
+    state.adapterDefinition = adapterDefinition ?? state.adapterDefinition ?? null
     state.account = account
     state.client = account.client
     state.protocol = this.findProtocol(account)
     state.detachEvents?.()
-    this.installInboundCompatibility(state)
+    this.installPlatformCompatibility(state)
     this.attachAccountEvents(state)
     this.accounts.set(id, state)
     state.status = 'pending'
@@ -401,20 +309,21 @@ export class OneBotsGateway {
     return state
   }
 
-  async requestQrLogin(channelId, platform = ONEBOTS_PLATFORM, options = {}) {
+  async requestQrLogin(channelId, platform = '', options = {}) {
     let opts = options
     let plat = platform
     if (typeof platform === 'object' && platform !== null) {
       opts = platform
-      plat = opts.platform ?? ONEBOTS_PLATFORM
+      plat = opts.platform ?? ''
     }
     const channel = typeof channelId === 'object' ? channelId : null
     const id = String(channel ? channel.id : channelId)
-    plat = channel?.platform ?? plat
+    const adapterDefinition = opts.adapterDefinition ?? null
+    plat = adapterDefinition?.onebots?.platform ?? channel?.platform ?? plat
     const force = opts.force === true
 
     let state = this.accounts.get(id)
-    if (!state) state = await this.startAccount({ id, platform: plat, ...channel })
+    if (!state) state = await this.startAccount({ id, platform: plat, ...channel }, adapterDefinition)
 
     // If an existing valid QR is already active and not forced, return it immediately.
     if (!force && state.qr?.status === 'qr' && (state.qr.qrCodeUrl || state.qr.qrcode)) {
@@ -552,7 +461,8 @@ export class OneBotsGateway {
     await state.stopPromise
     state.clientDetach?.()
     state.detachEvents?.()
-    state.restoreInboundCompatibility?.()
+    state.restorePlatformCompatibility?.()
+    state.restorePlatformCompatibility = null
     state.clientDetach = null
     state.clientFacade = null
     const adapter = this.app.adapters?.get?.(state.platform)
@@ -560,12 +470,14 @@ export class OneBotsGateway {
     return true
   }
 
-  async deleteAccount(channelId) {
+  async deleteAccount(channelId, adapterDefinition = null) {
     const id = String(typeof channelId === 'object' ? channelId.id : channelId)
+    const state = this.accounts.get(id)
     await this.stopAccount(id)
-    const filePath = path.join(this.sessionDataDir, `${encodeURIComponent(id)}.json`)
-    await fs.promises.unlink(filePath).catch(error => {
-      if (error?.code !== 'ENOENT') throw error
+    const definition = state?.adapterDefinition ?? adapterDefinition
+    await definition?.onebots?.bridge?.deleteAccountData?.({
+      accountId: id,
+      gateway: this,
     })
     this.accounts.delete(id)
     this.qrSessions.delete(id)

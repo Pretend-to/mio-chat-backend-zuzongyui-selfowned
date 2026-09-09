@@ -71,7 +71,7 @@ test('Channel 管理 API 统一通过 OneBots，并兼容旧 wechat 记录', asy
   assert.equal(catalogResponse.body.data.version, 1)
   assert.deepEqual(
     catalogResponse.body.data.platforms.map(platform => platform.id),
-    ['wechat-clawbot'],
+    ['weixin-ilink'],
   )
   assert.equal(catalogResponse.body.data.platforms[0].auth.type, 'qrcode')
 
@@ -90,7 +90,8 @@ test('Channel 管理 API 统一通过 OneBots，并兼容旧 wechat 记录', asy
     config: { receive_mode: 'manual' },
   }), createResponse)
   const generic = await store.get(createResponse.body.data.id)
-  assert.equal(generic.type, 'onebots')
+  assert.equal(generic.type, 'weixin-ilink')
+  assert.equal(generic.driver, 'onebots')
   assert.equal(generic.platform, 'wechat-clawbot')
   assert.equal(generic.protocol, 'onebot.v12')
   assert.deepEqual(generic.config, {

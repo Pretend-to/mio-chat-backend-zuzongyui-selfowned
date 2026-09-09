@@ -17,6 +17,7 @@ sequenceDiagram
     participant UI as 前端 (ChannelManagerView)
     participant API as Express API (/api/channels)
     participant RT as ChannelRuntime
+    participant WX as WeixinIlinkAdapter
     participant GW as OneBotsGateway (内嵌单例)
     participant OB as OneBots BaseApp (进程内，无监听端口)
     participant CH as OneBotChannel (继承 BaseChannel)
@@ -24,12 +25,14 @@ sequenceDiagram
 
     Note over GW,OB: 服务启动 (app.js 启动时)
     RT->>GW: init({ dataDir: 'channels-data/onebots' })
-    GW->>OB: 按需注册 wechat-clawbot 与 onebot-v12
+    WX->>GW: 声明底层 platform、账号配置与兼容钩子
+    GW->>OB: 按需注册 platform adapter 与 onebot-v12
     GW->>OB: 创建 BaseApp，以 manual transport 直连协议实例
 
     Note over UI,API: 扫码绑定流程 (以微信为例)
     UI->>API: POST /api/channels/:id/qrcode
-    API->>GW: requestQrLogin(accountId, 'wechat-clawbot')
+    API->>WX: 解析 adapterId=weixin-ilink
+    WX->>GW: requestQrLogin(accountId)
     GW->>OB: 启动登录会话，捕获 'qr' 事件
     GW-->>API: 返回二维码 URL 与 Data
     API-->>UI: 展示二维码
@@ -39,7 +42,8 @@ sequenceDiagram
     API-->>UI: 返回 confirmed 状态，绑定完成
 
     Note over OB,LLM: 消息交互全链路
-    OB->>CH: OneBot V12 事件推送 (内存 dispatch/ingest)
+    OB->>WX: OneBot V12 事件推送 (内存 dispatch/ingest)
+    WX->>CH: 解密媒体并转为通用 OneBot 入站内容
     CH->>CH: 入站滑动防抖缓冲 (Text 5s / Media 10s)
     CH->>CH: startTyping() 开启 4s 输入心跳
     CH->>CH: 获取 Session 单飞互斥锁排队
@@ -63,19 +67,23 @@ channels/
 │   ├── ConfirmationManager.js # 高危工具调用挂起与确认
 │   └── SlashHandler.js        # /help, /new, /yolo, /btw 斜杠指令
 ├── onebots/                   # [新增] OneBots 驱动层集成目录
-│   ├── OneBotsGateway.js      # 进程内 OneBots 单例管理器 (生命周期、账号挂载、扫码事件捕获)
+│   ├── OneBotsGateway.js      # 进程内 OneBots 单例管理器（不含平台特例）
 │   ├── OneBotChannel.js       # 继承 BaseChannel 的通用 OneBot 渠道适配器
 │   └── config.js              # OneBots 运行时配置常量与端口策略
+├── weixin-ilink/              # MioChat 微信 iLink 渠道适配器
+│   ├── WeixinIlinkChannel.js  # 微信媒体、context token 等渠道行为
+│   ├── OneBotsBridge.js       # ClawBot 配置、session 与入站兼容钩子
+│   └── index.js               # 适配器描述及工厂
+├── ChannelAdapterRegistry.js  # 渠道发现、创建协议与旧标识映射
 ├── ChannelRuntime.js          # [重构] 渠道运行时生命周期管控 (纳管 OneBotsGateway 与各渠道实例)
-├── ChannelStore.js            # 渠道配置存储 (SQLite / JSON)
-└── wechat/                    # 现有的自研 iLink 实现 (保留作为参考及平滑过渡备选)
+└── ChannelStore.js            # 渠道配置存储 (SQLite / JSON)
 ```
 
 ### 2.1 OneBotsGateway (内嵌网关单例)
 - **定位**：Node.js 内部唯一的 OneBots 运行时代理，负责与 OneBots 的 `BaseApp` 打交道。
 - **职责**：
   1. **进程内传输**：不启动 OneBots HTTP/WS 监听；V12 事件通过 `dispatch -> ingest`、动作通过 `protocol.apply()` 在内存中直接传递；
-  2. **适配器按需加载**：第一阶段动态导入并注册 `@onebots/adapter-wechat-clawbot`；飞书与 Telegram 在第三阶段再增加依赖和凭据表单；
+  2. **适配器按需加载**：根据上层渠道适配器声明动态导入 OneBots platform 包，网关不硬编码微信或 QQ；
   3. **协议提供**：注册 `@onebots/protocol-onebot-v12` 协议转换器；
   4. **扫码事件汇聚中心**：
      - 维护一个内存 Map：`qrSessions: Map<accountId, { qrCodeUrl, qrcode, status, timer }>`；
@@ -102,19 +110,21 @@ channels/
 
 ```json
 {
-  "type": "onebots",
+  "type": "weixin-ilink",
+  "adapterId": "weixin-ilink",
+  "driver": "onebots",
   "platform": "wechat-clawbot",
   "protocol": "onebot.v12",
   "config": {}
 }
 ```
 
-- `type` 固定表示 MioChat 渠道运行时；
-- `platform` 对应 OneBots adapter 名称，并按需加载 `@onebots/adapter-<platform>`；
+- `type` / `adapterId` 表示 MioChat 渠道适配器；
+- `driver` 表示底层运行时；`platform` 对应 OneBots adapter 名称；
 - `protocol` 表示 MioChat 边界协议，当前支持 `onebot.v12`；
 - `config` 无损保存 adapter 专属配置。
 
-历史 `type=wechat` 记录读取时映射为 `onebots + wechat-clawbot`，无需数据迁移或重新扫码。`MIO_WECHAT_DRIVER` 已废弃且不再控制路由。
+历史 `type=wechat` 及 `type=onebots + platform=wechat-clawbot` 记录读取时解析为 `weixin-ilink` 适配器，无需数据迁移或重新扫码。`MIO_WECHAT_DRIVER` 已废弃且不再控制路由。
 
 ### 3.1 OneBotsGateway 规范签名
 ```ts
@@ -125,8 +135,9 @@ export class OneBotsGateway {
   /** 动态注册并启动一个账号 */
   async startAccount(channelConfig: {
     id: string;
-    type: 'onebots';
-    platform: string; // 'wechat-clawbot' | 'feishu' | 'telegram' 等
+    type: string; // MioChat 适配器，例如 'weixin-ilink'、'qq-bot'
+    driver: 'onebots';
+    platform: string; // OneBots 底层 platform，例如 'wechat-clawbot'
     protocol: 'onebot.v12';
     config?: Record<string, any>;
     credentials?: Record<string, any>;
@@ -145,14 +156,14 @@ export class OneBotsGateway {
 
 ### 3.2 渠道发现与创建 API
 
-管理端不得硬编码 OneBots 平台列表。创建前先请求 `GET /api/channels/catalog`，根据返回的 `platforms[].configSchema` 渲染配置表单，再提交版本化请求：
+管理端不得硬编码 OneBots 平台列表。创建前先请求 `GET /api/channels/catalog`，根据返回的 `adapters[].configSchema` 渲染配置表单，再提交版本化请求。响应暂时同时返回同内容的 `platforms` 字段，以兼容旧版前端：
 
 ```json
 {
   "version": 1,
   "adapter": {
+    "id": "weixin-ilink",
     "runtime": "onebots",
-    "platform": "wechat-clawbot",
     "protocol": "onebot.v12"
   },
   "profile": {
@@ -167,7 +178,7 @@ export class OneBotsGateway {
 }
 ```
 
-后续平台通过 `registerChannelPlatform()` 注册名称、认证方式、能力和配置 schema；运行时再按 `platform` 懒加载对应的 `@onebots/adapter-<platform>`。旧版扁平 `POST /api/channels` 请求继续兼容。
+后续平台在自己的目录（如 `channels/qq-bot/`）导出渠道定义，再通过 `registerChannelAdapter()` 注册名称、认证方式、能力、配置 schema、OneBots platform 和平台桥接钩子。OneBots 层只负责协议与账号运行时，不包含微信或 QQ 的业务逻辑。旧版扁平 `POST /api/channels` 请求继续兼容。
 
 ### 3.3 ChannelRuntime 联动改造
 在 `ChannelRuntime.js` 中：
@@ -189,8 +200,9 @@ export class ChannelRuntime {
   async start(channelId) {
     const channel = await this.channelStore.get(channelId);
     // 判断若为 OneBots 纳管平台：
-    await this.onebotsGateway.startAccount(channel);
-    const chn = new OneBotChannel({
+    const adapter = resolveChannelAdapter(channel);
+    await this.onebotsGateway.startAccount(channel, adapter);
+    const chn = adapter.createChannel({
       channelId,
       gateway: this.onebotsGateway,
       memory: await this.createMemory(channel.agentId),
@@ -236,29 +248,21 @@ export class ChannelRuntime {
 
 得益于 OneBots 对 26 个平台的统一抽象，当后续需要新增渠道时，开发者仅需：
 
-1. **前端 `ChannelManagerView.vue`**：
-   在新建渠道弹窗中新增类型下拉选项（如 `feishu`、`telegram`），当选中非扫码平台时，展示对应的凭据表单：
+1. **新增独立渠道目录**：创建 `channels/<adapter-id>/`，实现渠道类、OneBots 桥接钩子与描述信息；
+2. **注册渠道适配器**：通过 `registerChannelAdapter()` 注册，前端会根据 catalog 自动展示，并根据 schema 渲染凭据表单：
    - 飞书：`app_id`、`app_secret`、`verification_token`
    - Telegram：`bot_token`
    - 钉钉：`client_id`、`client_secret`
-2. **后端 `ChannelStore`**：
+3. **后端 `ChannelStore`**：
    直接将凭据字典存储至 `channel.credentials` 字段中；
-3. **驱动挂载**：
-   `OneBotsGateway` 动态注册对应的 `adapter-feishu` 并传入配置，无需为各平台单独写业务消息处理器，**全部直接复用 `OneBotChannel`**！
+4. **复用通用能力**：平台渠道类继承 `OneBotChannel`，只覆盖认证、媒体或平台扩展动作；通用收发、防抖与 LLM 管线无需重复实现。
 
 ---
 
-## 6. 后续分步实施演进路线
+## 6. 后续演进路线
 
-为确保系统稳定性，建议在后续进入代码开发时采用三阶段推进：
+通用 OneBots 底座、微信 iLink 独立适配器和管理端动态 catalog 已落地。后续按以下顺序扩展：
 
-- **阶段一（环境准备与网关打样）**：
-  - 更新 Node.js 引擎声明至 `>=24.0.0`，安装 `onebots` 相关依赖；
-  - 编写 `OneBotsGateway.js` 并在单元测试中验证内部实例启停与回环通信。
-- **阶段二（微信 ClawBot 迁移验证）**：
-  - 编写 `OneBotChannel.js` 并对接微信扫码事件流；
-  - 跑通真实微信收发 -> 防抖 -> 正在输入打字心跳 -> LLM 回复全链路；
-  - 覆盖旧渠道凭证迁移、二维码登录和 OneBot V12 收发回归。
-- **阶段三（第二渠道开箱——飞书/Telegram）**：
-  - 在前端管理面板暴露飞书 / Telegram 配置项；
-  - 验证使用同一个 `OneBotChannel` 无缝驱动飞书和 Telegram，彻底宣告通用多渠道体系落成。
+- **微信回归**：持续覆盖二维码登录、旧凭证复用、Markdown、图片和文件收发；
+- **新增第二渠道**：以 `channels/qq-bot/` 为模板验证注册机制、配置 schema 和平台扩展动作；
+- **抽象稳定后**：视实际平台差异继续下沉通用逻辑，但不把平台特例反向放入 `channels/onebots/`。

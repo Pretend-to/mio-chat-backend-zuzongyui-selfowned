@@ -7,8 +7,6 @@
  */
 
 import { BaseChannel, splitMessageText } from '../common/BaseChannel.js'
-import { bufferToImageUrl } from '../../utils/imgTools.js'
-import storageService from '../../lib/storage/StorageService.js'
 
 const MEDIA_TYPES = new Set([
   'image',
@@ -25,7 +23,7 @@ function asString(value) {
   return value == null ? '' : String(value)
 }
 
-function segmentData(segment) {
+export function segmentData(segment) {
   return segment &&
     typeof segment === 'object' &&
     segment.data &&
@@ -34,20 +32,20 @@ function segmentData(segment) {
     : {}
 }
 
-function contentSegments(msg) {
+export function contentSegments(msg) {
   const content = msg?.content ?? msg?.message ?? msg?.segments ?? []
   if (Array.isArray(content)) return content
   if (content == null || content === '') return []
   return [content]
 }
 
-function segmentType(segment) {
+export function segmentType(segment) {
   return typeof segment === 'object'
     ? asString(segment.type).toLowerCase()
     : 'text'
 }
 
-function sourceFromData(data) {
+export function sourceFromData(data) {
   // OneBot file may be a URL, local path, base64:// URI, or an implementation
   // specific file id. Preserve the value instead of downloading it here.
   return (
@@ -61,7 +59,7 @@ function sourceFromData(data) {
   )
 }
 
-function fileNameFromData(data, source) {
+export function fileNameFromData(data, source) {
   if (data.file_name || data.filename || data.name)
     return asString(data.file_name || data.filename || data.name)
   if (typeof source === 'string') {
@@ -79,93 +77,6 @@ function mediaDescriptor(type, data, source) {
     ...(data.file_id != null ? { fileId: data.file_id } : {}),
     ...(data.duration != null ? { duration: data.duration } : {}),
   }
-}
-
-function wechatMediaSegments(msg) {
-  return contentSegments(msg)
-    .map((segment, index) => ({
-      segment,
-      index,
-      type: segmentType(segment),
-      data: segmentData(segment),
-    }))
-    .filter(({ type, data }) => {
-      const source = sourceFromData(data)
-      return (
-        (type === 'image' || type === 'file') && source != null && source !== ''
-      )
-    })
-}
-
-function rawWechatMediaItem(item, type) {
-  if (!item || typeof item !== 'object') return null
-  if (type === 'image') return item.image_item?.media ?? null
-  if (type === 'file') return item.file_item?.media ?? null
-  return null
-}
-
-function sameMediaHandle(data, rawMedia) {
-  if (!rawMedia) return false
-  const fileId = data.file_id ?? data.fileId
-  const url = data.url
-  return (
-    (fileId != null && fileId === rawMedia.encrypt_query_param) ||
-    (url != null && url === rawMedia.full_url)
-  )
-}
-
-/**
- * Resolve iLink item indexes without guessing. The OneBots protocol projects
- * raw media handles into V12 segments, while the ClawBot action addresses the
- * original iLink item list.
- */
-function reliableWechatItemIndexes(msg, mediaSegments) {
-  const explicit = mediaSegments.map(
-    ({ data }) => data.item_index ?? data.itemIndex,
-  )
-  const rawItems = msg?.raw_event?.item_list
-  if (!Array.isArray(rawItems)) {
-    return explicit.every((index) => Number.isSafeInteger(index) && index >= 0)
-      ? explicit
-      : null
-  }
-
-  const used = new Set()
-  const indexes = []
-  for (let i = 0; i < mediaSegments.length; i++) {
-    const { type, data } = mediaSegments[i]
-    const candidate = explicit[i]
-    if (Number.isSafeInteger(candidate) && candidate >= 0) {
-      if (!rawWechatMediaItem(rawItems[candidate], type) || used.has(candidate))
-        return null
-      used.add(candidate)
-      indexes.push(candidate)
-      continue
-    }
-
-    const matches = rawItems
-      .map((item, index) => ({ item, index }))
-      .filter(
-        ({ item, index }) =>
-          !used.has(index) &&
-          sameMediaHandle(data, rawWechatMediaItem(item, type)),
-      )
-    if (matches.length !== 1) return null
-    used.add(matches[0].index)
-    indexes.push(matches[0].index)
-  }
-  return indexes
-}
-
-function rawWechatMessageId(msg) {
-  const raw = msg?.raw_event
-  const value =
-    raw?.message_id ??
-    raw?.seq ??
-    raw?.client_id ??
-    msg?.message_id ??
-    msg?.messageId
-  return value == null || value === '' ? null : String(value)
 }
 
 /** Extract plain text from a OneBot V12 event (SDK event or raw protocol event). */
@@ -309,90 +220,6 @@ export class OneBotChannel extends BaseChannel {
     return splitMessageText(text)
   }
 
-  _isWechatClawbot() {
-    const platform = String(
-      this.platform ?? this.channel?.platform ?? this.client?.platform ?? '',
-    ).toLowerCase()
-    if (platform === 'wechat-clawbot') return true
-    // OneBots currently defaults every embedded account to the ClawBot
-    // adapter. Keep an explicitly named non-WeChat platform on the generic
-    // path so future adapters retain their existing media behavior.
-    return (
-      !platform &&
-      String(this.channel?.type ?? '')
-        .toLowerCase()
-        .startsWith('onebots')
-    )
-  }
-
-  async _downloadWechatMedia(msg, mediaSegments) {
-    const messageId = rawWechatMessageId(msg)
-    if (!messageId) {
-      this.log?.warn?.(
-        `[${this.channelType}] 微信媒体缺少可靠 message_id，已跳过下载`,
-      )
-      return { files: [], images: [] }
-    }
-
-    const indexes = reliableWechatItemIndexes(msg, mediaSegments)
-    if (mediaSegments.length > 1 && !indexes) {
-      this.log?.warn?.(
-        `[${this.channelType}] 微信多媒体消息缺少可靠 item_index，已拒绝媒体下载`,
-      )
-      return { files: [], images: [] }
-    }
-    const canCall = typeof this.client?.call === 'function'
-    if (!canCall) {
-      this.log?.warn?.(
-        `[${this.channelType}] 微信媒体客户端不支持 download_media`,
-      )
-      return { files: [], images: [] }
-    }
-
-    const images = []
-    const files = []
-    for (let i = 0; i < mediaSegments.length; i++) {
-      const { type, data } = mediaSegments[i]
-      const params = { message_id: messageId }
-      if (indexes?.[i] != null) params.item_index = indexes[i]
-      try {
-        const response = await this.client.call('download_media', params)
-        const result =
-          response?.data && typeof response.data === 'object'
-            ? response.data
-            : response
-        if (typeof result?.base64 !== 'string' || !result.base64.trim()) {
-          throw new Error('download_media 未返回有效 Base64')
-        }
-        const buffer = Buffer.from(result.base64, 'base64')
-        if (buffer.length === 0) throw new Error('download_media 返回空媒体')
-
-        if (type === 'image') {
-          const localUrl =
-            typeof this.bufferToImageUrl === 'function'
-              ? await this.bufferToImageUrl(buffer)
-              : await bufferToImageUrl(this.baseUrl || '', buffer)
-          if (localUrl) images.push(localUrl)
-        } else {
-          const fileName =
-            result.file_name ||
-            result.fileName ||
-            fileNameFromData(data, sourceFromData(data))
-          const stored = await storageService.upload(buffer, fileName, 'file', {
-            contentType:
-              result.mime_type || result.mimeType || 'application/octet-stream',
-          })
-          if (stored?.url) files.push({ name: fileName, url: stored.url })
-        }
-      } catch (error) {
-        this.log?.warn?.(
-          `[${this.channelType}] 微信媒体下载解密失败: ${error?.message || error}`,
-        )
-      }
-    }
-    return { files, images }
-  }
-
   _isDuplicateInbound(msg) {
     const messageId = msg?.message_id ?? msg?.messageId
     if (messageId == null || messageId === '') return false
@@ -522,6 +349,18 @@ export class OneBotChannel extends BaseChannel {
   // BaseChannel.start is intentionally not used: the SDK owns its receive loop.
   async _loop() {}
 
+  resolveInboundMedia(_msg, extracted) {
+    return {
+      ...extracted,
+      hasMedia: extracted.images.length > 0 || extracted.files.length > 0,
+      pendingMediaPromise: null,
+    }
+  }
+
+  extractContextToken(msg) {
+    return msg.context_token ?? msg.contextToken ?? null
+  }
+
   async handleIncomingMessage(msg, detailType = null) {
     if (!msg) return
     const metadata = this.gateway?.getInboundMetadata?.(
@@ -571,11 +410,9 @@ export class OneBotChannel extends BaseChannel {
     }
 
     const extracted = extractMedia(msg)
-    const isWechatClawbot = this._isWechatClawbot()
-    const wechatSegments = isWechatClawbot ? wechatMediaSegments(msg) : []
-    const hasWechatMedia = wechatSegments.length > 0
-    const images = isWechatClawbot ? [] : extracted.images
-    const files = isWechatClawbot ? [] : extracted.files
+    const inboundMedia = this.resolveInboundMedia(msg, extracted)
+    const images = inboundMedia.images
+    const files = inboundMedia.files
     const text =
       extractText(msg) ||
       (extracted.images.length
@@ -583,9 +420,6 @@ export class OneBotChannel extends BaseChannel {
         : extracted.files.length
           ? `[文件: ${extracted.files[0].name}]`
           : '')
-    const pendingMediaPromise = hasWechatMedia
-      ? this._downloadWechatMedia(msg, wechatSegments)
-      : null
     const from = type === 'group' ? `group:${groupId}` : String(userId)
     const messageContext = {
       messageId: msg.message_id ?? msg.messageId,
@@ -593,11 +427,7 @@ export class OneBotChannel extends BaseChannel {
       userId,
       ...(type === 'group' ? { groupId } : {}),
     }
-    const contextToken =
-      msg.context_token ??
-      msg.contextToken ??
-      msg.extensions?.wechat_clawbot?.context_token ??
-      null
+    const contextToken = this.extractContextToken(msg)
     const isSlash = text.trim().startsWith('/')
 
     this.log?.info?.(
@@ -607,10 +437,10 @@ export class OneBotChannel extends BaseChannel {
     return this.enqueueInboundDebounce(from, {
       contextToken,
       files,
-      hasMedia: hasWechatMedia || images.length > 0 || files.length > 0,
+      hasMedia: inboundMedia.hasMedia,
       images,
       immediate: isSlash,
-      pendingMediaPromise,
+      pendingMediaPromise: inboundMedia.pendingMediaPromise,
       rawMsg: msg,
       text,
       ctx: messageContext,
@@ -823,5 +653,5 @@ export class OneBotChannel extends BaseChannel {
   }
 }
 
-export { splitMessageText, splitMessageText as splitWechatText }
+export { splitMessageText }
 export default OneBotChannel

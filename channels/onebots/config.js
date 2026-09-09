@@ -13,41 +13,7 @@ export const ONEBOTS_PORT = Number.isInteger(configuredPort) && configuredPort >
   : 5727
 
 export const ONEBOTS_PROTOCOL = 'onebot.v12'
-export const ONEBOTS_PLATFORM = 'wechat-clawbot'
 export const ONEBOTS_RECEIVE_MODE = 'manual'
-
-/**
- * Resolve persisted channel aliases to the unified OneBots runtime.
- *
- * `wechat` is intentionally kept as a storage/API compatibility alias: old
- * records do not need a schema migration or a new QR binding. The former
- * MIO_WECHAT_DRIVER rollout flag is accepted but no longer controls routing.
- */
-export function isOneBotsChannel(channel, _env = process.env) {
-  if (!channel) return false
-  const driver = String(channel.driver || '').toLowerCase()
-  const type = String(channel.type || '').toLowerCase()
-  const platform = String(channel.platform || '').toLowerCase()
-  return type === 'wechat' ||
-    driver === 'onebots' ||
-    type === 'onebots' ||
-    type === 'onebot' ||
-    type.startsWith('onebots:') ||
-    type.startsWith('onebots-') ||
-    driver === 'onebot' ||
-    platform === 'onebots' ||
-    platform === ONEBOTS_PLATFORM
-}
-
-/** Resolve the concrete OneBots adapter while retaining old WeChat records. */
-export function resolveOneBotsPlatform(channel = {}) {
-  const explicit = String(channel.platform || '').trim().toLowerCase()
-  if (explicit && explicit !== 'onebots') return explicit
-  const type = String(channel.type || '').trim().toLowerCase()
-  const compact = type.match(/^onebots?[:/-](.+)$/)
-  if (compact?.[1]) return compact[1]
-  return ONEBOTS_PLATFORM
-}
 
 /** Protocol settings for an in-process account. */
 export function createProtocolConfig(overrides = {}) {
@@ -69,10 +35,7 @@ export default {
   ONEBOTS_HOST,
   ONEBOTS_PORT,
   ONEBOTS_PROTOCOL,
-  ONEBOTS_PLATFORM,
   ONEBOTS_RECEIVE_MODE,
-  isOneBotsChannel,
-  resolveOneBotsPlatform,
   createProtocolConfig,
   createLoopbackUrl,
 }

@@ -4,33 +4,35 @@ import assert from 'node:assert/strict'
 import {
   getChannelCatalog,
   normalizeChannelCreatePayload,
-  registerChannelPlatform,
-} from '../../channels/onebots/platformCatalog.js'
+  registerChannelAdapter,
+} from '../../channels/ChannelAdapterRegistry.js'
 
-test('channel catalog exposes versioned platform metadata without package internals', () => {
+test('channel catalog exposes adapter metadata and a legacy platforms alias', () => {
   const catalog = getChannelCatalog()
   assert.equal(catalog.version, 1)
   assert.equal(catalog.runtimes[0].id, 'onebots')
-  assert.equal(catalog.platforms[0].id, 'wechat-clawbot')
-  assert.equal(catalog.platforms[0].auth.type, 'qrcode')
-  assert.equal('package' in catalog.platforms[0], false)
+  assert.equal(catalog.adapters[0].id, 'weixin-ilink')
+  assert.equal(catalog.adapters[0].auth.type, 'qrcode')
+  assert.equal('package' in catalog.adapters[0], false)
+  assert.deepEqual(catalog.platforms, catalog.adapters)
 })
 
-test('registered OneBots platforms normalize optional metadata and remain creatable', () => {
-  registerChannelPlatform({
+test('registered channel adapters normalize optional metadata and remain creatable', () => {
+  registerChannelAdapter({
     id: 'TEST-PLATFORM',
     name: '测试平台',
     runtime: 'OneBots',
     protocol: 'OneBot.V12',
+    onebots: { platform: 'test-platform' },
   })
   const created = normalizeChannelCreatePayload({
     adapter: { runtime: 'onebots', platform: 'test-platform', protocol: 'onebot.v12' },
   })
   assert.equal(created.name, '测试平台')
   assert.equal(created.agentId, 'channel-master')
-  const platform = getChannelCatalog().platforms.find(item => item.id === 'test-platform')
-  assert.equal(platform.auth.type, 'none')
-  assert.deepEqual(platform.configSchema, [])
+  const adapter = getChannelCatalog().adapters.find(item => item.id === 'test-platform')
+  assert.equal(adapter.auth.type, 'none')
+  assert.deepEqual(adapter.configSchema, [])
 })
 
 test('structured channel creation resolves defaults and adapter config', () => {
@@ -42,7 +44,9 @@ test('structured channel creation resolves defaults and adapter config', () => {
     },
     profile: { name: '研发微信', agentId: 'agent-dev', provider: 'Vertex' },
   }), {
-    type: 'onebots',
+    type: 'weixin-ilink',
+    adapterId: 'weixin-ilink',
+    driver: 'onebots',
     platform: 'wechat-clawbot',
     protocol: 'onebot.v12',
     name: '研发微信',
@@ -55,16 +59,16 @@ test('structured channel creation resolves defaults and adapter config', () => {
 
 test('flat legacy WeChat creation remains compatible and invalid platforms fail closed', () => {
   const legacy = normalizeChannelCreatePayload({ type: 'wechat', name: '旧微信' })
-  assert.equal(legacy.type, 'wechat')
+  assert.equal(legacy.type, 'weixin-ilink')
   assert.equal(legacy.platform, 'wechat-clawbot')
   const onebotAlias = normalizeChannelCreatePayload({ type: 'onebot' })
-  assert.equal(onebotAlias.type, 'onebots')
+  assert.equal(onebotAlias.type, 'weixin-ilink')
   assert.equal(onebotAlias.platform, 'wechat-clawbot')
   assert.throws(
     () => normalizeChannelCreatePayload({
       adapter: { runtime: 'onebots', platform: 'missing', protocol: 'onebot.v12' },
     }),
-    /Unsupported channel platform/,
+    /Unsupported channel adapter/,
   )
   assert.throws(
     () => normalizeChannelCreatePayload({ version: 2 }),

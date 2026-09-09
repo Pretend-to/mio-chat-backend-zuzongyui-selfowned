@@ -8,9 +8,13 @@ import { BaseApp } from 'onebots'
 import '@onebots/adapter-wechat-clawbot'
 import {
   OneBotsGateway,
-  normalizeIlinkInboundPacket,
 } from '../../channels/onebots/OneBotsGateway.js'
-import { isOneBotsChannel, resolveOneBotsPlatform } from '../../channels/onebots/config.js'
+import {
+  isOneBotsChannel,
+  resolveOneBotsPlatform,
+} from '../../channels/ChannelAdapterRegistry.js'
+import { normalizeIlinkInboundPacket } from '../../channels/weixin-ilink/OneBotsBridge.js'
+import { weixinIlinkAdapter } from '../../channels/weixin-ilink/index.js'
 
 class FakeProtocol extends EventEmitter {
   async apply(action, params) {
@@ -117,11 +121,11 @@ test('blank iLink group_id is normalized as a private event', () => {
 
 test('WeChat ClawBot accounts preserve Markdown by default and allow an explicit override', () => {
   const gateway = new OneBotsGateway({ app: makeApp(), skipRegistration: true })
-  const defaults = gateway.normalizeChannelConfig({ id: 'markdown-default' })
+  const defaults = gateway.normalizeChannelConfig({ id: 'markdown-default' }, weixinIlinkAdapter)
   const explicitPlain = gateway.normalizeChannelConfig({
     id: 'plain-override',
     config: { outbound_text_format: 'plain' },
-  })
+  }, weixinIlinkAdapter)
 
   assert.equal(defaults.outbound_text_format, 'markdown')
   assert.equal(explicitPlain.outbound_text_format, 'plain')
@@ -162,8 +166,8 @@ test('OneBotsGateway mounts an account, bridges QR/ready state, and is idempoten
   })
 
   await gateway.init()
-  const first = await gateway.startAccount({ id: 'channel-1', platform: 'wechat-clawbot' })
-  const second = await gateway.startAccount({ id: 'channel-1', platform: 'wechat-clawbot' })
+  const first = await gateway.startAccount({ id: 'channel-1' }, weixinIlinkAdapter)
+  const second = await gateway.startAccount({ id: 'channel-1' }, weixinIlinkAdapter)
   await new Promise(resolve => setImmediate(resolve))
 
   assert.equal(first, second)
@@ -249,7 +253,7 @@ test('OneBotsGateway seeds a legacy credential session without overwriting it', 
     botId: 'legacy-bot',
     userId: 'legacy-user',
     contextTokens: { 'legacy-user': 'legacy-context' },
-  })
+  }, weixinIlinkAdapter)
   const filePath = path.join(sessionDataDir, `${encodeURIComponent('legacy/channel')}.json`)
   assert.deepEqual(JSON.parse(await fs.promises.readFile(filePath, 'utf8')), {
     token: 'legacy-token',
@@ -265,7 +269,7 @@ test('OneBotsGateway seeds a legacy credential session without overwriting it', 
     token: 'stale-token',
     botId: 'stale-bot',
     userId: 'stale-user',
-  })
+  }, weixinIlinkAdapter)
   assert.deepEqual(JSON.parse(await fs.promises.readFile(filePath, 'utf8')), { token: 'new-token' })
   await gateway.deleteAccount('legacy/channel')
   assert.equal(fs.existsSync(filePath), false)
@@ -277,8 +281,8 @@ test('OneBotsGateway does not create a legacy session when credentials are incom
   t.after(() => fs.promises.rm(path.dirname(sessionDataDir), { force: true, recursive: true }))
   const gateway = new OneBotsGateway({ app: makeApp(), skipRegistration: true, sessionDataDir })
 
-  await gateway.startAccount({ id: 'missing-token', platform: 'wechat-clawbot', botId: 'bot' })
-  await gateway.startAccount({ id: 'missing-bot', platform: 'wechat-clawbot', token: 'token' })
+  await gateway.startAccount({ id: 'missing-token', botId: 'bot' }, weixinIlinkAdapter)
+  await gateway.startAccount({ id: 'missing-bot', token: 'token' }, weixinIlinkAdapter)
   assert.equal(fs.existsSync(sessionDataDir), false)
   await gateway.dispose()
 })
@@ -292,7 +296,7 @@ test('OneBotsGateway requestQrLogin triggers interactive QR login even when acco
 
   const account = app.adapters.get('wechat-clawbot').accounts.get('online-channel')
   let interactiveCalled = 0
-  account.client.runInteractiveQrLogin = async signal => {
+  account.client.runInteractiveQrLogin = async _signal => {
     interactiveCalled++
     account.client.emit('qr', { qrCodeUrl: 'https://weixin.qq.com/qr/fresh-123', qrcode: 'ticket-abc' })
   }
@@ -314,7 +318,7 @@ test('OneBotsGateway requestQrLogin supports force option to refresh QR code', a
 
   const account = app.adapters.get('wechat-clawbot').accounts.get('force-channel')
   let seq = 0
-  account.client.runInteractiveQrLogin = async signal => {
+  account.client.runInteractiveQrLogin = async _signal => {
     seq++
     account.client.emit('qr', { qrCodeUrl: `https://weixin.qq.com/qr/${seq}`, qrcode: `ticket-${seq}` })
   }

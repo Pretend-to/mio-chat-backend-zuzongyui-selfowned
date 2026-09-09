@@ -6,6 +6,7 @@ import {
   extractMedia,
   extractText,
 } from '../../channels/onebots/OneBotChannel.js'
+import { WeixinIlinkChannel } from '../../channels/weixin-ilink/WeixinIlinkChannel.js'
 import storageService from '../../lib/storage/StorageService.js'
 
 function makeMemory() {
@@ -64,8 +65,13 @@ function makeChannel(client = makeClient()) {
 }
 
 function makeWechatChannel(client = makeClient()) {
-  const { channel } = makeChannel(client)
-  channel.platform = 'wechat-clawbot'
+  const channel = new WeixinIlinkChannel({
+    client,
+    memory: makeMemory(),
+    masterId: 'master',
+    llm: { process: async () => ({ text: '' }) },
+    debounceEnabled: false,
+  })
   return { channel, client }
 }
 
@@ -317,7 +323,7 @@ test('微信 OneBot 合并网关原始元数据并在关闭防抖时等待媒体
       extensions: { wechat_clawbot: { context_token: 'ctx-45' } },
     }),
   }
-  const channel = new OneBotChannel({
+  const channel = new WeixinIlinkChannel({
     channel: { id: 'wechat-channel', type: 'wechat' },
     client,
     gateway,
@@ -357,7 +363,7 @@ test('微信 OneBot 合并网关原始元数据并在关闭防抖时等待媒体
 test('OneBotChannel provides system prompt with <msg> convention and dynamic channel type', () => {
   const { channel: wechatChannel } = makeWechatChannel()
   const wechatPrompt = wechatChannel.getChannelPrompt()
-  assert.match(wechatPrompt, /【wechat-clawbot渠道交互与消息风格规范】/)
+  assert.match(wechatPrompt, /【weixin-ilink渠道交互与消息风格规范】/)
   assert.match(wechatPrompt, /<msg>内容<\/msg>/)
   assert.match(wechatPrompt, /<break\/>/)
 
